@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -19,10 +19,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ITElasticsearchStorageV6 extends ITElasticsearchStorage {
 
-  @RegisterExtension ElasticsearchStorageExtension backend = new ElasticsearchStorageExtension(
-    "openzipkin/zipkin-elasticsearch6:2.16.0");
+  @RegisterExtension ElasticsearchExtension elasticsearch = new ElasticsearchExtension(6);
 
-  @Override ElasticsearchStorageExtension backend() {
-    return backend;
+  @Override ElasticsearchExtension elasticsearch() {
+    return elasticsearch;
   }
 }

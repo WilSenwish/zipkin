@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,6 +13,7 @@
  */
 package zipkin2.collector.kafka;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -29,6 +30,7 @@ import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import zipkin2.Call;
 import zipkin2.CheckResult;
 import zipkin2.collector.Collector;
 import zipkin2.collector.CollectorComponent;
@@ -59,7 +61,7 @@ public final class KafkaCollector extends CollectorComponent {
   /** Configuration including defaults needed to consume spans from a Kafka topic. */
   public static final class Builder extends CollectorComponent.Builder {
     final Properties properties = new Properties();
-    Collector.Builder delegate = Collector.newBuilder(KafkaCollector.class);
+    final Collector.Builder delegate = Collector.newBuilder(KafkaCollector.class);
     CollectorMetrics metrics = CollectorMetrics.NOOP_METRICS;
     String topic = "zipkin";
     int streams = 1;
@@ -161,7 +163,7 @@ public final class KafkaCollector extends CollectorComponent {
 
   @Override
   public KafkaCollector start() {
-    kafkaWorkers.get();
+    kafkaWorkers.start();
     return this;
   }
 
@@ -173,7 +175,8 @@ public final class KafkaCollector extends CollectorComponent {
       KafkaFuture<String> maybeClusterId = getAdminClient().describeCluster().clusterId();
       maybeClusterId.get(1, TimeUnit.SECONDS);
       return CheckResult.OK;
-    } catch (Exception e) {
+    } catch (Throwable e) {
+      Call.propagateIfFatal(e);
       return CheckResult.failed(e);
     }
   }
@@ -192,7 +195,7 @@ public final class KafkaCollector extends CollectorComponent {
   @Override
   public void close() {
     kafkaWorkers.close();
-    if (adminClient != null) adminClient.close(1, TimeUnit.SECONDS);
+    if (adminClient != null) adminClient.close(Duration.ofSeconds(1));
   }
 
   @Override public final String toString() {
@@ -214,7 +217,7 @@ public final class KafkaCollector extends CollectorComponent {
       this.builder = builder;
     }
 
-    ExecutorService get() {
+    void start() {
       if (pool == null) {
         synchronized (this) {
           if (pool == null) {
@@ -222,7 +225,6 @@ public final class KafkaCollector extends CollectorComponent {
           }
         }
       }
-      return pool;
     }
 
     void close() {
@@ -244,13 +246,11 @@ public final class KafkaCollector extends CollectorComponent {
 
     ExecutorService compute() {
       ExecutorService pool =
-          streams == 1
-              ? Executors.newSingleThreadExecutor()
-              : Executors.newFixedThreadPool(streams);
+        streams == 1 ? Executors.newSingleThreadExecutor() : Executors.newFixedThreadPool(streams);
 
       for (int i = 0; i < streams; i++) {
         // TODO: bad idea to lazy reference properties from a mutable builder
-        // copy them here and then pass this to the KafkaCollectorWorker ctor instead
+        // copy them here and then pass this to the KafkaCollectorWorker constructor instead
         KafkaCollectorWorker worker = new KafkaCollectorWorker(builder);
         workers.add(worker);
         pool.execute(guardFailures(worker));

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -26,7 +26,7 @@ import okio.Buffer;
 import okio.ByteString;
 import zipkin2.Endpoint;
 import zipkin2.Span;
-import zipkin2.internal.Platform;
+import zipkin2.internal.RecyclableBuffers;
 
 public class WireSpanDecoder {
   static final Logger LOG = Logger.getLogger(WireSpanDecoder.class.getName());
@@ -174,7 +174,7 @@ public class WireSpanDecoder {
 
           span.localEndpoint(decodeEndpoint(input));
 
-          input.endMessage(token);
+          input.endMessageAndGetUnknownFields(token);
           break;
         }
         case 9: {
@@ -182,7 +182,7 @@ public class WireSpanDecoder {
 
           span.remoteEndpoint(decodeEndpoint(input));
 
-          input.endMessage(token);
+          input.endMessageAndGetUnknownFields(token);
           break;
         }
         case 10: {
@@ -190,7 +190,7 @@ public class WireSpanDecoder {
 
           decodeAnnotation(input, span);
 
-          input.endMessage(token);
+          input.endMessageAndGetUnknownFields(token);
           break;
         }
         case 11: {
@@ -198,7 +198,7 @@ public class WireSpanDecoder {
 
           decodeTag(input, span);
 
-          input.endMessage(token);
+          input.endMessageAndGetUnknownFields(token);
           break;
         }
         case 12: {
@@ -256,7 +256,7 @@ public class WireSpanDecoder {
 
             spans.add(decodeOne(input));
 
-            input.endMessage(subToken);
+            input.endMessageAndGetUnknownFields(subToken);
             break;
           }
           default: {
@@ -270,7 +270,7 @@ public class WireSpanDecoder {
     }
 
     try {
-      input.endMessage(token);
+      input.endMessageAndGetUnknownFields(token);
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
@@ -291,7 +291,7 @@ public class WireSpanDecoder {
       throw new AssertionError("hex field greater than 32 chars long: " + length);
     }
 
-    char[] result = Platform.shortStringBuffer();
+    char[] result = RecyclableBuffers.shortStringBuffer();
 
     for (int i = 0; i < bytes.size(); i ++) {
       byte b = bytes.getByte(i);

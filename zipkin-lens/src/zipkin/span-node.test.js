@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -96,11 +96,9 @@ describe('SpanNode', () => {
    */
   it('should traverse breadth first', () => {
     const ids = [];
-    a.traverse(s => ids.push(s.id));
+    a.traverse((s) => ids.push(s.id));
 
-    expect(ids).toEqual([
-      'a', 'b', 'c', 'd', 'e', 'f', '1', '2',
-    ]);
+    expect(ids).toEqual(['a', 'b', 'c', 'd', 'e', 'f', '1', '2']);
   });
 });
 
@@ -131,10 +129,10 @@ describe('SpanNodeBuilder', () => {
     const root = new SpanNodeBuilder({}).build(trace.slice(0).reverse());
 
     expect(root.span).toEqual(trace[0]);
-    expect(root.children.map(n => n.span)).toEqual([trace[1]]);
+    expect(root.children.map((n) => n.span)).toEqual([trace[1]]);
 
     const [child] = root.children;
-    expect(child.children.map(n => n.span)).toEqual([trace[2]]);
+    expect(child.children.map((n) => n.span)).toEqual([trace[2]]);
   });
 
   // input should be merged, but this ensures we are fine anyway
@@ -155,10 +153,16 @@ describe('SpanNodeBuilder', () => {
     const trace = [
       { traceId: 'a', id: 'b', timestamp: 1 },
       {
-        traceId: 'a', parentId: 'b', id: 'c', timestamp: 2,
+        traceId: 'a',
+        parentId: 'b',
+        id: 'c',
+        timestamp: 2,
       },
       {
-        traceId: 'a', parentId: 'b', id: 'd', timestamp: 3,
+        traceId: 'a',
+        parentId: 'b',
+        id: 'd',
+        timestamp: 3,
       },
       { traceId: 'a', id: 'e', timestamp: 4 },
       { traceId: 'a', id: 'f', timestamp: 5 },
@@ -167,10 +171,10 @@ describe('SpanNodeBuilder', () => {
     const root = new SpanNodeBuilder({}).build(trace);
 
     const spans = [];
-    root.traverse(span => spans.push(span));
+    root.traverse((span) => spans.push(span));
     expect(spans).toEqual(trace);
     expect(root.span.id).toBe('000000000000000b');
-    expect(root.children.map(n => n.span)).toEqual(trace.slice(1));
+    expect(root.children.map((n) => n.span)).toEqual(trace.slice(1));
   });
 
   // spans are often reported depth-first, so it is possible to not have a root yet
@@ -186,26 +190,22 @@ describe('SpanNodeBuilder', () => {
     expect(root.span).toBeUndefined();
 
     const spans = [];
-    root.traverse(span => spans.push(span));
+    root.traverse((span) => spans.push(span));
     expect(spans).toEqual(trace);
   });
 
   // input should be well formed, but this ensures we are fine anyway
   it('should skip on cycle', () => {
-    const trace = [
-      { traceId: 'a', parentId: 'b', id: 'b' },
-    ];
+    const trace = [{ traceId: 'a', parentId: 'b', id: 'b' }];
 
     const root = new SpanNodeBuilder({}).build(trace);
 
-    expect(root.span).toEqual(
-      {
-        traceId: '000000000000000a',
-        id: '000000000000000b',
-        annotations: [],
-        tags: {},
-      },
-    );
+    expect(root.span).toEqual({
+      traceId: '000000000000000a',
+      id: '000000000000000b',
+      annotations: [],
+      tags: {},
+    });
     expect(root.children.length).toBe(0);
   });
 
@@ -213,18 +213,27 @@ describe('SpanNodeBuilder', () => {
     const trace = [
       { traceId: 'a', id: '1' },
       {
-        traceId: 'a', parentId: '1', id: 'a', timestamp: 2,
+        traceId: 'a',
+        parentId: '1',
+        id: 'a',
+        timestamp: 2,
       },
       {
-        traceId: 'a', parentId: '1', id: 'b', timestamp: 1,
+        traceId: 'a',
+        parentId: '1',
+        id: 'b',
+        timestamp: 1,
       },
       { traceId: 'a', parentId: '1', id: 'c' },
     ].map(clean);
 
     const root = new SpanNodeBuilder({}).build(trace);
 
-    expect(root.children.map(n => n.span))
-      .toEqual([trace[3], trace[2], trace[1]]); // null first
+    expect(root.children.map((n) => n.span)).toEqual([
+      trace[3],
+      trace[2],
+      trace[1],
+    ]); // null first
   });
 
   it('should order children by timestamp when IPs change ', () => {
@@ -258,7 +267,46 @@ describe('SpanNodeBuilder', () => {
     const root = new SpanNodeBuilder({}).build(trace);
 
     const spans = [];
-    root.traverse(span => spans.push(span));
+    root.traverse((span) => spans.push(span));
     expect(spans).toEqual(trace);
+  });
+
+  it('should remove incorrect shared flag on only root span', () => {
+    const a = {
+      traceId: '1',
+      id: 'a',
+      kind: 'SERVER',
+      shared: true,
+      timestamp: 1,
+      localEndpoint: { serviceName: 'routing' },
+    };
+    // intentionally missing client per #3001
+    const b = {
+      traceId: '1',
+      parentId: 'a',
+      id: 'b',
+      kind: 'SERVER',
+      shared: true,
+      timestamp: 2,
+      localEndpoint: { serviceName: 'routing' },
+    };
+    // Also, intentionally missing client per #3001
+    const c = {
+      traceId: '1',
+      parentId: 'a',
+      id: 'c',
+      kind: 'SERVER',
+      shared: true,
+      timestamp: 3,
+      localEndpoint: { serviceName: 'yelp_main/biz' },
+    };
+
+    const trace = [a, b, c].map(clean);
+
+    const root = new SpanNodeBuilder({}).build(trace);
+    expect(root.span.id).toBe('000000000000000a');
+    expect(root.span.shared).toBeUndefined();
+
+    expect(root.children.map((n) => n.span)).toEqual([trace[1], trace[2]]);
   });
 });

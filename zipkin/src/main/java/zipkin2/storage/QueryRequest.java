@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -16,11 +16,9 @@ package zipkin2.storage;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import zipkin2.Annotation;
 import zipkin2.Span;
 import zipkin2.internal.Nullable;
@@ -160,13 +158,13 @@ public final class QueryRequest {
       limit = source.limit;
     }
 
-    /** @see QueryRequest#serviceName() */
+    /** Sets {@link QueryRequest#serviceName()} */
     public Builder serviceName(@Nullable String serviceName) {
       this.serviceName = serviceName;
       return this;
     }
 
-    /** @see QueryRequest#remoteServiceName() */
+    /** Sets {@link QueryRequest#remoteServiceName()} */
     public Builder remoteServiceName(@Nullable String remoteServiceName) {
       this.remoteServiceName = remoteServiceName;
       return this;
@@ -183,14 +181,14 @@ public final class QueryRequest {
     }
 
     /**
-     * Corresponds to query parameter "annotationQuery". Ex. "http.method=GET and error". Parameter keys and values are
-     * trimmed.
+     * Corresponds to query parameter "annotationQuery". Ex. "http.method=GET and error". Parameter
+     * keys and values are trimmed.
      *
      * @see QueryRequest#annotationQueryString()
      */
     public Builder parseAnnotationQuery(@Nullable String annotationQuery) {
       if (annotationQuery == null || annotationQuery.isEmpty()) return this;
-      Map<String, String> map = new LinkedHashMap<>();
+      Map<String, String> map = new LinkedHashMap<String, String>();
       for (String ann : annotationQuery.split(" and ", 100)) {
         int idx = ann.indexOf('=');
         if (idx == -1) {
@@ -201,44 +199,45 @@ public final class QueryRequest {
           // tag
           String[] keyValue = ann.split("=", 2);
           // tags are put regardless, i.e. last tag wins
-          map.put(ann.substring(0, idx).trim(), keyValue.length < 2 ? "" : ann.substring(idx + 1).trim());
+          map.put(ann.substring(0, idx).trim(),
+            keyValue.length < 2 ? "" : ann.substring(idx + 1).trim());
         }
       }
       return annotationQuery(map);
     }
 
-    /** @see QueryRequest#annotationQuery() */
+    /** Sets {@link QueryRequest#annotationQuery()} */
     public Builder annotationQuery(Map<String, String> annotationQuery) {
       if (annotationQuery == null) throw new NullPointerException("annotationQuery == null");
       this.annotationQuery = annotationQuery;
       return this;
     }
 
-    /** @see QueryRequest#minDuration() */
+    /** Sets {@link QueryRequest#minDuration()} */
     public Builder minDuration(@Nullable Long minDuration) {
       this.minDuration = minDuration;
       return this;
     }
 
-    /** @see QueryRequest#maxDuration() */
+    /** Sets {@link QueryRequest#maxDuration()} */
     public Builder maxDuration(@Nullable Long maxDuration) {
       this.maxDuration = maxDuration;
       return this;
     }
 
-    /** @see QueryRequest#endTs() */
+    /** Sets {@link QueryRequest#endTs()} */
     public Builder endTs(long endTs) {
       this.endTs = endTs;
       return this;
     }
 
-    /** @see QueryRequest#lookback() */
+    /** Sets {@link QueryRequest#lookback()} */
     public Builder lookback(long lookback) {
       this.lookback = lookback;
       return this;
     }
 
-    /** @see QueryRequest#limit() */
+    /** Sets {@link QueryRequest#limit()} */
     public Builder limit(int limit) {
       this.limit = limit;
       return this;
@@ -313,7 +312,8 @@ public final class QueryRequest {
     String serviceNameToMatch = serviceName();
     String remoteServiceNameToMatch = remoteServiceName();
     String spanNameToMatch = spanName();
-    Map<String, String> annotationQueryRemaining = new LinkedHashMap<>(annotationQuery());
+    Map<String, String> annotationQueryRemaining =
+      new LinkedHashMap<String, String>(annotationQuery());
 
     for (Span span : spans) {
       String localServiceName = span.localServiceName();
@@ -384,18 +384,16 @@ public final class QueryRequest {
     this.limit = limit;
   }
 
-  @Override
-  public String toString() {
-    return "QueryRequest{"
-      + "serviceName=" + serviceName + ", "
-      + "remoteServiceName=" + remoteServiceName + ", "
-      + "spanName=" + spanName + ", "
-      + "annotationQuery=" + annotationQuery + ", "
-      + "minDuration=" + minDuration + ", "
-      + "maxDuration=" + maxDuration + ", "
-      + "endTs=" + endTs + ", "
-      + "lookback=" + lookback + ", "
-      + "limit=" + limit
-      + "}";
+  @Override public String toString() {
+    String result = "QueryRequest{";
+    result += ("endTs=" + endTs + ", ");
+    result += ("lookback=" + lookback + ", ");
+    if (serviceName != null) result += ("serviceName=" + serviceName + ", ");
+    if (remoteServiceName != null) result += ("remoteServiceName=" + remoteServiceName + ", ");
+    if (spanName != null) result += ("spanName=" + spanName + ", ");
+    if (!annotationQuery.isEmpty()) result += ("annotationQuery=" + annotationQuery + ", ");
+    if (minDuration != null) result += ("minDuration=" + minDuration + ", ");
+    if (maxDuration != null) result += ("maxDuration=" + maxDuration + ", ");
+    return result + "limit=" + limit + "}";
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,66 +13,109 @@
  */
 package zipkin2.elasticsearch;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.linecorp.armeria.common.AggregatedHttpRequest;
-import com.linecorp.armeria.common.HttpMethod;
-import java.io.IOException;
-import java.util.function.Supplier;
-import zipkin2.elasticsearch.internal.client.HttpCall;
+import static zipkin2.elasticsearch.ElasticsearchVersion.V5_0;
+import static zipkin2.elasticsearch.ElasticsearchVersion.V6_0;
+import static zipkin2.elasticsearch.ElasticsearchVersion.V7_0;
+import static zipkin2.elasticsearch.ElasticsearchVersion.V7_8;
+import static zipkin2.elasticsearch.ElasticsearchVersion.V8_0;
 
-import static zipkin2.elasticsearch.ElasticsearchAutocompleteTags.AUTOCOMPLETE;
-import static zipkin2.elasticsearch.ElasticsearchSpanStore.DEPENDENCY;
-import static zipkin2.elasticsearch.ElasticsearchSpanStore.SPAN;
-import static zipkin2.elasticsearch.internal.JsonReaders.enterPath;
-import static zipkin2.internal.Platform.SHORT_STRING_LENGTH;
-
-/** Returns a version-specific span and dependency index template */
+/** Returns version-specific index templates */
+// TODO: make a main class that spits out the index template using ENV variables for the server,
+// a parameter for the version, and a parameter for the index type. Ex.
+// java -cp zipkin-storage-elasticsearch.jar zipkin2.elasticsearch.VersionSpecificTemplates 6.7 span
 final class VersionSpecificTemplates {
+  /** Maximum character length constraint of most names, IP literals and IDs. */
+  static final int SHORT_STRING_LENGTH = 256;
+  static final String TYPE_AUTOCOMPLETE = "autocomplete";
+  static final String TYPE_SPAN = "span";
+  static final String TYPE_DEPENDENCY = "dependency";
+
   /**
    * In Zipkin search, we do exact match only (keyword). Norms is about scoring. We don't use that
    * in our API, and disable it to reduce disk storage needed.
    */
   static final String KEYWORD = "{ \"type\": \"keyword\", \"norms\": false }";
 
-  final ElasticsearchStorage es;
+  final String indexPrefix;
+  final int indexReplicas, indexShards;
+  final boolean searchEnabled, strictTraceId;
+  final Integer templatePriority;
 
-  VersionSpecificTemplates(ElasticsearchStorage es) {
-    this.es = es;
+  VersionSpecificTemplates(String indexPrefix, int indexReplicas, int indexShards,
+    boolean searchEnabled, boolean strictTraceId, Integer templatePriority) {
+    this.indexPrefix = indexPrefix;
+    this.indexReplicas = indexReplicas;
+    this.indexShards = indexShards;
+    this.searchEnabled = searchEnabled;
+    this.strictTraceId = strictTraceId;
+    this.templatePriority = templatePriority;
   }
 
-  String indexPattern(String type, float version) {
-    return new StringBuilder()
-      .append('"')
-      .append(version < 6.0f ? "template" : "index_patterns")
-      .append("\": \"")
-      .append(es.indexNameFormatter().index())
-      .append(indexTypeDelimiter(version))
-      .append(type)
-      .append("-*")
-      .append("\"").toString();
+  String indexPattern(String type, ElasticsearchVersion version) {
+    return '"'
+      + (version.compareTo(V6_0) < 0 ? "template" : "index_patterns")
+      + "\": \""
+      + indexPrefix
+      + indexTypeDelimiter(version)
+      + type
+      + "-*"
+      + "\"";
   }
 
-  String indexProperties(float version) {
+  String indexProperties(ElasticsearchVersion version) {
     // 6.x _all disabled https://www.elastic.co/guide/en/elasticsearch/reference/6.7/breaking-changes-6.0.html#_the_literal__all_literal_meta_field_is_now_disabled_by_default
     // 7.x _default disallowed https://www.elastic.co/guide/en/elasticsearch/reference/current/breaking-changes-7.0.html#_the_literal__default__literal_mapping_is_no_longer_allowed
     String result = ""
-      + "    \"index.number_of_shards\": " + es.indexShards() + ",\n"
-      + "    \"index.number_of_replicas\": " + es.indexReplicas() + ",\n"
+      + "    \"index.number_of_shards\": " + indexShards + ",\n"
+      + "    \"index.number_of_replicas\": " + indexReplicas + ",\n"
       + "    \"index.requests.cache.enable\": true";
-    // There is no explicit documentation of index.mapper.dynamic being removed in v7, but it was.
-    if (version >= 7.0f) return result + "\n";
-    return result + ",\n    \"index.mapper.dynamic\": false\n";
+    return result + "\n";
+  }
+
+  String indexTemplate(ElasticsearchVersion version) {
+    if (useComposableTemplate(version)) {
+      return "\"template\": {\n";
+    }
+
+    return "";
+  }
+
+  String indexTemplateClosing(ElasticsearchVersion version) {
+    if (useComposableTemplate(version)) {
+      return "},\n";
+    }
+
+    return "";
+  }
+
+  String templatePriority(ElasticsearchVersion version) {
+    if (useComposableTemplate(version)) {
+      return "\"priority\": " + templatePriority + "\n";
+    }
+
+    return "";
+  }
+
+  String beginTemplate(String type, ElasticsearchVersion version) {
+    return "{\n"
+      + "  " + indexPattern(type, version) + ",\n"
+      + indexTemplate(version)
+      + "  \"settings\": {\n"
+      + indexProperties(version);
+  }
+
+  String endTemplate(ElasticsearchVersion version) {
+    return indexTemplateClosing(version)
+      + templatePriority(version)
+      + "}";
   }
 
   /** Templatized due to version differences. Only fields used in search are declared */
-  String spanIndexTemplate(float version) {
-    String result = "{\n"
-      + "  " + indexPattern(SPAN, version) + ",\n"
-      + "  \"settings\": {\n"
-      + indexProperties(version);
+  String spanIndexTemplate(ElasticsearchVersion version) {
+    String result = beginTemplate(TYPE_SPAN, version);
 
     String traceIdMapping = KEYWORD;
-    if (!es.strictTraceId()) {
+    if (!strictTraceId) {
       // Supporting mixed trace ID length is expensive due to needing a special analyzer and
       // "fielddata" which consumes a lot of heap. Sites should only turn off strict trace ID when
       // in a transition, and keep trace ID length transitions as short time as possible.
@@ -99,10 +142,10 @@ final class VersionSpecificTemplates {
 
     result += "  },\n";
 
-    if (es.searchEnabled()) {
+    if (searchEnabled) {
       return result
         + ("  \"mappings\": {\n"
-        + maybeWrap(SPAN, version, ""
+        + maybeWrap(TYPE_SPAN, version, ""
         + "    \"_source\": {\"excludes\": [\"_q\"] },\n"
         + "    \"dynamic_templates\": [\n"
         + "      {\n"
@@ -139,55 +182,48 @@ final class VersionSpecificTemplates {
         + "      \"_q\": " + KEYWORD + "\n"
         + "    }\n")
         + "  }\n"
-        + "}");
+        + endTemplate(version));
     }
     return result
       + ("  \"mappings\": {\n"
-      + maybeWrap(SPAN, version, ""
+      + maybeWrap(TYPE_SPAN, version, ""
       + "    \"properties\": {\n"
       + "      \"traceId\": " + traceIdMapping + ",\n"
       + "      \"annotations\": { \"enabled\": false },\n"
       + "      \"tags\": { \"enabled\": false }\n"
       + "    }\n")
       + "  }\n"
-      + "}");
+      + endTemplate(version));
   }
 
   /** Templatized due to version differences. Only fields used in search are declared */
-  String dependencyTemplate(float version) {
-    return "{\n"
-      + "  " + indexPattern(DEPENDENCY, version) + ",\n"
-      + "  \"settings\": {\n"
-      + indexProperties(version)
+  String dependencyTemplate(ElasticsearchVersion version) {
+    return beginTemplate(TYPE_DEPENDENCY, version)
       + "  },\n"
       + "  \"mappings\": {\n"
-      + maybeWrap(DEPENDENCY, version, "    \"enabled\": false\n")
+      + maybeWrap(TYPE_DEPENDENCY, version, "    \"enabled\": false\n")
       + "  }\n"
-      + "}";
+      + endTemplate(version);
   }
 
   // The key filed of a autocompleteKeys is intentionally names as tagKey since it clashes with the
   // BodyConverters KEY
-  String autocompleteTemplate(float version) {
-    return "{\n"
-      + "  " + indexPattern(AUTOCOMPLETE, version) + ",\n"
-      + "  \"settings\": {\n"
-      + indexProperties(version)
+  String autocompleteTemplate(ElasticsearchVersion version) {
+    return beginTemplate(TYPE_AUTOCOMPLETE, version)
       + "  },\n"
       + "  \"mappings\": {\n"
-      + maybeWrap(AUTOCOMPLETE, version, ""
+      + maybeWrap(TYPE_AUTOCOMPLETE, version, ""
       + "    \"enabled\": true,\n"
       + "    \"properties\": {\n"
       + "      \"tagKey\": " + KEYWORD + ",\n"
       + "      \"tagValue\": " + KEYWORD + "\n"
       + "    }\n")
       + "  }\n"
-      + "}";
+      + endTemplate(version);
   }
 
-  IndexTemplates get() throws IOException {
-    float version = getVersion(es.http());
-    if (version < 5.0f || version >= 8.0f) {
+  IndexTemplates get(ElasticsearchVersion version) {
+    if (version.compareTo(V5_0) < 0 || version.compareTo(V8_0) >= 0) {
       throw new IllegalArgumentException(
         "Elasticsearch versions 5-7.x are supported, was: " + version);
     }
@@ -200,6 +236,10 @@ final class VersionSpecificTemplates {
       .build();
   }
 
+  boolean useComposableTemplate(ElasticsearchVersion version) {
+    return (version.compareTo(V7_8) >= 0 && templatePriority != null);
+  }
+
   /**
    * This returns a delimiter based on what's supported by the Elasticsearch version.
    *
@@ -208,36 +248,14 @@ final class VersionSpecificTemplates {
    *
    * <p>See https://github.com/openzipkin/zipkin/issues/2219
    */
-  static char indexTypeDelimiter(float version) {
-    return version < 7.0f ? ':' : '-';
+  static char indexTypeDelimiter(ElasticsearchVersion version) {
+    return version.compareTo(V7_0) < 0 ? ':' : '-';
   }
 
-  static String maybeWrap(String type, float version, String json) {
+  static String maybeWrap(String type, ElasticsearchVersion version, String json) {
     // ES 7.x defaults include_type_name to false https://www.elastic.co/guide/en/elasticsearch/reference/current/breaking-changes-7.0.html#_literal_include_type_name_literal_now_defaults_to_literal_false_literal
-    if (version >= 7.0f) return json;
+    if (version.compareTo(V7_0) >= 0) return json;
     return "    \"" + type + "\": {\n  " + json.replace("\n", "\n  ") + "  }\n";
-  }
-
-  static float getVersion(HttpCall.Factory callFactory) throws IOException {
-    AggregatedHttpRequest getNode = AggregatedHttpRequest.of(HttpMethod.GET, "/");
-    return callFactory.newCall(getNode, ReadVersionNumber.INSTANCE, "get-node").execute();
-  }
-
-  enum ReadVersionNumber implements HttpCall.BodyConverter<Float> {
-    INSTANCE;
-
-    @Override public Float convert(JsonParser parser, Supplier<String> contentString) {
-      String version = null;
-      try {
-        if (enterPath(parser, "version", "number") != null) version = parser.getText();
-      } catch (RuntimeException | IOException possiblyParseException) {
-      }
-      if (version == null) {
-        throw new IllegalArgumentException(
-          ".version.number not found in response: " + contentString.get());
-      }
-      return Float.valueOf(version.substring(0, 3));
-    }
   }
 }
 

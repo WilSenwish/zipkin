@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,16 +13,17 @@
  */
 package zipkin2.elasticsearch;
 
-import com.linecorp.armeria.client.HttpClient;
 import com.linecorp.armeria.client.ResponseTimeoutException;
 import com.linecorp.armeria.client.UnprocessedRequestException;
+import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.client.endpoint.EndpointGroupException;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
 import com.linecorp.armeria.common.HttpData;
 import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.MediaType;
 import com.linecorp.armeria.common.ResponseHeaders;
-import com.linecorp.armeria.testing.junit.server.mock.MockWebServerExtension;
+import com.linecorp.armeria.testing.junit5.server.mock.MockWebServerExtension;
+import java.time.Instant;
 import java.util.concurrent.RejectedExecutionException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,28 +37,32 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static zipkin2.TestObjects.DAY;
 
 class ElasticsearchStorageTest {
-
   static final AggregatedHttpResponse SUCCESS_RESPONSE =
-    AggregatedHttpResponse.of(ResponseHeaders.of(HttpStatus.OK), HttpData.EMPTY_DATA);
+    AggregatedHttpResponse.of(ResponseHeaders.of(HttpStatus.OK), HttpData.empty());
 
   @RegisterExtension static MockWebServerExtension server = new MockWebServerExtension();
 
   ElasticsearchStorage storage;
 
   @BeforeEach void setUp() {
-    storage = ElasticsearchStorage.newBuilder(new LazyHttpClient() {
-      @Override public HttpClient get() {
-        return HttpClient.of(server.httpUri("/"));
-      }
-
-      @Override public String toString() {
-        return server.httpUri("/");
-      }
-    }).build();
+    storage = newBuilder().build();
   }
 
   @AfterEach void tearDown() {
     storage.close();
+  }
+
+  @Test void ensureIndexTemplates_false() throws Exception {
+    storage.close();
+    storage = newBuilder().ensureTemplates(false).build();
+
+    server.enqueue(SUCCESS_RESPONSE); // dependencies request
+
+    long endTs = Instant.parse("2016-10-02T00:00:00Z").toEpochMilli();
+    storage.spanStore().getDependencies(endTs, DAY).execute();
+
+    assertThat(server.takeRequest().request().path())
+      .startsWith("/zipkin*dependency-2016-10-01,zipkin*dependency-2016-10-02/_search");
   }
 
   @Test void memoizesIndexTemplate() throws Exception {
@@ -69,7 +74,7 @@ class ElasticsearchStorageTest {
     server.enqueue(SUCCESS_RESPONSE); // dependencies request
     server.enqueue(SUCCESS_RESPONSE); // dependencies request
 
-    long endTs = storage.indexNameFormatter().parseDate("2016-10-02");
+    long endTs = Instant.parse("2016-10-02T00:00:00Z").toEpochMilli();
     storage.spanStore().getDependencies(endTs, DAY).execute();
     storage.spanStore().getDependencies(endTs, DAY).execute();
 
@@ -110,11 +115,48 @@ class ElasticsearchStorageTest {
     MediaType.JSON_UTF_8, // below is actual message from Amazon
     "{\"Message\":\"User: anonymous is not authorized to perform: es:ESHttpGet\"}}");
 
-  @Test void check() {
+  static final AggregatedHttpResponse RESPONSE_VERSION_6 = AggregatedHttpResponse.of(
+    HttpStatus.OK, MediaType.JSON_UTF_8, "{\"version\":{\"number\":\"6.7.0\"}}");
+
+  @Test void check_ensuresIndexTemplates_memozied() {
+    server.enqueue(RESPONSE_VERSION_6);
+    server.enqueue(SUCCESS_RESPONSE); // get span template
+    server.enqueue(SUCCESS_RESPONSE); // get dependency template
+    server.enqueue(SUCCESS_RESPONSE); // get tags template
+
+    server.enqueue(HEALTH_RESPONSE);
+
+    assertThat(storage.check()).isEqualTo(CheckResult.OK);
+
+    // Later checks do not redo index template requests
     server.enqueue(HEALTH_RESPONSE);
 
     assertThat(storage.check()).isEqualTo(CheckResult.OK);
   }
+
+  // makes sure we don't NPE
+  @Test void check_ensuresIndexTemplates_fail_onNoContent() {
+    server.enqueue(SUCCESS_RESPONSE); // empty instead of version json
+
+    CheckResult result = storage.check();
+    assertThat(result.ok()).isFalse();
+    assertThat(result.error().getMessage())
+      .isEqualTo("No content reading Elasticsearch version");
+  }
+
+  // makes sure we don't NPE
+  @Test void check_fail_onNoContent() {
+    storage.ensuredTemplates = true; // assume index templates called before
+
+    server.enqueue(SUCCESS_RESPONSE); // empty instead of success response
+
+    CheckResult result = storage.check();
+    assertThat(result.ok()).isFalse();
+    assertThat(result.error().getMessage())
+      .isEqualTo("No content reading Elasticsearch version");
+  }
+
+  // TODO: when Armeria's mock server supports it, add a test for IOException
 
   @Test void check_unauthorized() {
     server.enqueue(RESPONSE_UNAUTHORIZED);
@@ -154,7 +196,116 @@ class ElasticsearchStorageTest {
    */
   @Test void toStringContainsOnlySummaryInformation() {
     assertThat(storage).hasToString(
-      String.format("ElasticsearchStorage{initialEndpoints=%s, index=zipkin}",
-        server.httpUri("/")));
+      String.format("ElasticsearchStorage{initialEndpoints=%s, index=zipkin}", server.httpUri()));
+  }
+
+  /** Ensure that Zipkin uses the legacy resource path when priority is not set. */
+  @Test void check_create_legacy_indexTemplate_resourcePath_version78() {
+    server.enqueue(AggregatedHttpResponse.of(
+      HttpStatus.OK, MediaType.JSON_UTF_8, "{\"version\":{\"number\":\"7.8.0\"}}"));
+    server.enqueue(SUCCESS_RESPONSE); // get span template
+    server.enqueue(SUCCESS_RESPONSE); // get dependency template
+    server.enqueue(SUCCESS_RESPONSE); // get autocomplete template
+    server.enqueue(SUCCESS_RESPONSE); // cluster health
+
+    storage.check();
+
+    server.takeRequest(); // get version
+
+    assertThat(server.takeRequest().request().path()) // get span template
+      .startsWith("/_template/zipkin-span_template");
+    assertThat(server.takeRequest().request().path()) // // get dependency template
+      .startsWith("/_template/zipkin-dependency_template");
+    assertThat(server.takeRequest().request().path()) // get autocomplete template
+      .startsWith("/_template/zipkin-autocomplete_template");
+  }
+
+  /**
+   * Ensure that Zipkin uses the correct resource path of /_index_template when creating index
+   * template for ES 7.8 when priority is set, as opposed to ES < 7.8 that uses /_template/
+   */
+  @Test void check_create_composable_indexTemplate_resourcePath_version78() {
+    // Set up a new storage with priority
+    storage.close();
+    storage = newBuilder().templatePriority(0).build();
+
+    server.enqueue(AggregatedHttpResponse.of(
+      HttpStatus.OK, MediaType.JSON_UTF_8, "{\"version\":{\"number\":\"7.8.0\"}}"));
+    server.enqueue(SUCCESS_RESPONSE); // get span template
+    server.enqueue(SUCCESS_RESPONSE); // get dependency template
+    server.enqueue(SUCCESS_RESPONSE); // get autocomplete template
+    server.enqueue(SUCCESS_RESPONSE); // cluster health
+
+    storage.check();
+
+    server.takeRequest(); // get version
+
+    assertThat(server.takeRequest().request().path()) // get span template
+      .startsWith("/_index_template/zipkin-span_template");
+    assertThat(server.takeRequest().request().path()) // // get dependency template
+      .startsWith("/_index_template/zipkin-dependency_template");
+    assertThat(server.takeRequest().request().path()) // get autocomplete template
+      .startsWith("/_index_template/zipkin-autocomplete_template");
+  }
+
+  /** Ensure that Zipkin uses the legacy resource path when priority is not set. */
+  @Test void check_create_legacy_indexTemplate_resourcePath_version79() {
+    server.enqueue(AggregatedHttpResponse.of(
+      HttpStatus.OK, MediaType.JSON_UTF_8, "{\"version\":{\"number\":\"7.9.0\"}}"));
+    server.enqueue(SUCCESS_RESPONSE); // get span template
+    server.enqueue(SUCCESS_RESPONSE); // get dependency template
+    server.enqueue(SUCCESS_RESPONSE); // get autocomplete template
+    server.enqueue(SUCCESS_RESPONSE); // cluster health
+
+    storage.check();
+
+    server.takeRequest(); // get version
+
+    assertThat(server.takeRequest().request().path()) // get span template
+      .startsWith("/_template/zipkin-span_template");
+    assertThat(server.takeRequest().request().path()) // // get dependency template
+      .startsWith("/_template/zipkin-dependency_template");
+    assertThat(server.takeRequest().request().path()) // get autocomplete template
+      .startsWith("/_template/zipkin-autocomplete_template");
+  }
+
+  /**
+   * Ensure that Zipkin uses the correct resource path of /_index_template when creating index
+   * template for ES 7.9 when priority is set, as opposed to ES < 7.8 that uses /_template/
+   */
+  @Test void check_create_composable_indexTemplate_resourcePath_version79() throws Exception {
+    // Set up a new storage with priority
+    storage.close();
+    storage = newBuilder().templatePriority(0).build();
+
+    server.enqueue(AggregatedHttpResponse.of(
+      HttpStatus.OK, MediaType.JSON_UTF_8, "{\"version\":{\"number\":\"7.9.0\"}}"));
+    server.enqueue(SUCCESS_RESPONSE); // get span template
+    server.enqueue(SUCCESS_RESPONSE); // get dependency template
+    server.enqueue(SUCCESS_RESPONSE); // get autocomplete template
+    server.enqueue(SUCCESS_RESPONSE); // cluster health
+
+    storage.check();
+
+    server.takeRequest(); // get version
+
+    assertThat(server.takeRequest().request().path()) // get span template
+      .startsWith("/_index_template/zipkin-span_template");
+    assertThat(server.takeRequest().request().path()) // // get dependency template
+      .startsWith("/_index_template/zipkin-dependency_template");
+    assertThat(server.takeRequest().request().path()) // get autocomplete template
+      .startsWith("/_index_template/zipkin-autocomplete_template");
+  }
+
+  ElasticsearchStorage.Builder newBuilder() {
+    return ElasticsearchStorage.newBuilder(new LazyHttpClient() {
+      @Override public WebClient get() {
+        return WebClient.of(server.httpUri());
+      }
+
+      @Override public String toString() {
+        return server.httpUri().toString();
+      }
+    });
   }
 }

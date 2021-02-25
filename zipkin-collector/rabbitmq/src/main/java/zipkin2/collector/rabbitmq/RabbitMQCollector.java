@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -26,6 +26,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import zipkin2.Call;
 import zipkin2.Callback;
 import zipkin2.CheckResult;
 import zipkin2.collector.Collector;
@@ -123,10 +124,12 @@ public final class RabbitMQCollector extends CollectorComponent {
   @Override
   public CheckResult check() {
     try {
+      start();
       CheckResult failure = connection.failure.get();
       if (failure != null) return failure;
       return CheckResult.OK;
-    } catch (RuntimeException e) {
+    } catch (Throwable e) {
+      Call.propagateIfFatal(e);
       return CheckResult.failed(e);
     }
   }
@@ -254,12 +257,13 @@ public final class RabbitMQCollector extends CollectorComponent {
     for (int i = 0; i < addresses.size(); i++) {
       String[] splitAddress = addresses.get(i).split(":", 100);
       String host = splitAddress[0];
-      Integer port = null;
+      int port = -1;
       try {
         if (splitAddress.length == 2) port = Integer.parseInt(splitAddress[1]);
       } catch (NumberFormatException ignore) {
+        // EmptyCatch ignored
       }
-      addressArray[i] = (port != null) ? new Address(host, port) : new Address(host);
+      addressArray[i] = (port > 0) ? new Address(host, port) : new Address(host);
     }
     return addressArray;
   }

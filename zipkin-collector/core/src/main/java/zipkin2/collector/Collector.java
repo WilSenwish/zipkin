@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -19,7 +19,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import zipkin2.Callback;
 import zipkin2.Span;
 import zipkin2.SpanBytesDecoderDetector;
@@ -51,7 +52,7 @@ public class Collector { // not final for mock
   /** Needed to scope this to the correct logging category */
   public static Builder newBuilder(Class<?> loggingClass) {
     if (loggingClass == null) throw new NullPointerException("loggingClass == null");
-    return new Builder(Logger.getLogger(loggingClass.getName()));
+    return new Builder(LoggerFactory.getLogger(loggingClass.getName()));
   }
 
   public static final class Builder {
@@ -64,21 +65,21 @@ public class Collector { // not final for mock
       this.logger = logger;
     }
 
-    /** @see {@link CollectorComponent.Builder#storage(StorageComponent)} */
+    /** Sets {@link {@link CollectorComponent.Builder#storage(StorageComponent)}} */
     public Builder storage(StorageComponent storage) {
       if (storage == null) throw new NullPointerException("storage == null");
       this.storage = storage;
       return this;
     }
 
-    /** @see {@link CollectorComponent.Builder#metrics(CollectorMetrics)} */
+    /** Sets {@link {@link CollectorComponent.Builder#metrics(CollectorMetrics)}} */
     public Builder metrics(CollectorMetrics metrics) {
       if (metrics == null) throw new NullPointerException("metrics == null");
       this.metrics = metrics;
       return this;
     }
 
-    /** @see {@link CollectorComponent.Builder#sampler(CollectorSampler)} */
+    /** Sets {@link {@link CollectorComponent.Builder#sampler(CollectorSampler)}} */
     public Builder sampler(CollectorSampler sampler) {
       if (sampler == null) throw new NullPointerException("sampler == null");
       this.sampler = sampler;
@@ -109,10 +110,10 @@ public class Collector { // not final for mock
   }
 
   /**
-   * @param executor the executor used to enqueue the storage request.
-   *
-   * <p>Calls to get the storage component could be blocking. This ensures requests that block
+   * Calls to get the storage component could be blocking. This ensures requests that block
    * callers (such as http or gRPC) do not add additional load during such events.
+   *
+   * @param executor the executor used to enqueue the storage request.
    */
   public void accept(List<Span> spans, Callback<Void> callback, Executor executor) {
     if (spans.isEmpty()) {
@@ -266,16 +267,16 @@ public class Collector { // not final for mock
   void handleError(Throwable e, Supplier<String> defaultLogMessage, Callback<Void> callback) {
     propagateIfFatal(e);
     callback.onError(e);
-    if (!logger.isLoggable(FINE)) return;
+    if (!logger.isDebugEnabled()) return;
 
     String error = e.getMessage() != null ? e.getMessage() : "";
     // We have specific code that customizes log messages. Use this when the case.
     if (error.startsWith("Malformed") || error.startsWith("Truncated")) {
-      logger.log(FINE, error, e);
+      logger.debug(error, e);
     } else { // otherwise, beautify the message
       String message =
         format("%s due to %s(%s)", defaultLogMessage.get(), e.getClass().getSimpleName(), error);
-      logger.log(FINE, message, e);
+      logger.debug(message, e);
     }
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -29,7 +29,8 @@ class ClockSkew {
   }
 }
 
-export function ipsMatch(a, b) { // export for testing
+export function ipsMatch(a, b) {
+  // export for testing
   if (!a || !b) return false;
   if (a.ipv6 && b.ipv6 && a.ipv6 === b.ipv6) {
     return true;
@@ -42,7 +43,7 @@ export function ipsMatch(a, b) { // export for testing
 function adjustTimestamps(span, skew) {
   if (!ipsMatch(skew.endpoint, span.localEndpoint)) return span;
 
-  const result = Object.assign({}, span);
+  const result = { ...span };
   if (span.timestamp) result.timestamp = span.timestamp - skew.skew;
   const annotationLength = span.annotations.length;
   if (annotationLength > 0) result.annotations = [];
@@ -57,7 +58,8 @@ function adjustTimestamps(span, skew) {
 }
 
 /* Uses span kind to determine if there's clock skew. */
-export function getClockSkew(node) { // export for testing
+export function getClockSkew(node) {
+  // export for testing
   const parent = node.parent ? node.parent.span : undefined;
   const child = node.span;
   if (!parent) return undefined;
@@ -132,7 +134,7 @@ function adjust(node, skewFromParent) {
     skew = skewFromParent;
   }
   // propagate skew to any children
-  node.children.forEach(child => adjust(child, skew));
+  node.children.forEach((child) => adjust(child, skew));
 }
 
 export function treeCorrectedForClockSkew(spans, debug = false) {
@@ -161,7 +163,9 @@ export function treeCorrectedForClockSkew(spans, debug = false) {
     if (debug) {
       /* eslint-disable no-console */
       const prefix = 'skipping redundant root span';
-      console.log(`${prefix}: traceId=${traceId}, rootSpanId=${rootSpanId}, spanId=${spanId}`);
+      console.log(
+        `${prefix}: traceId=${traceId}, rootSpanId=${rootSpanId}, spanId=${spanId}`,
+      );
     }
     return trace;
   }

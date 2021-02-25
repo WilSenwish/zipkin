@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -36,7 +36,8 @@ function link(callCounts, errorCounts) {
 }
 
 /*
- * This parses a span tree into dependency links used by Web UI. Ex. http://zipkin/dependency
+ * A dependency link is an edge between two services. This parses a span tree into dependency links
+ * used by Web UI. Ex. http://zipkin/dependency
  *
  * This implementation traverses the tree, and creates links for RPC and messaging spans. RPC links
  * are only between SERVER spans. One exception is at the bottom of the trace tree. CLIENT spans
@@ -56,7 +57,8 @@ export class DependencyLinker {
     while (ancestor) {
       const maybeRemote = ancestor.span;
       if (maybeRemote && maybeRemote.kind) {
-        if (this._debug) console.log(`found remote ancestor ${JSON.stringify(maybeRemote)}`);
+        if (this._debug)
+          console.log(`found remote ancestor ${JSON.stringify(maybeRemote)}`);
         return maybeRemote;
       }
       ancestor = ancestor.parent;
@@ -66,7 +68,9 @@ export class DependencyLinker {
 
   _addLink(parent, child, isError) {
     if (this.debug) {
-      console.log('incrementing ' + (isError ? 'error ' : '') + 'link ' + parent + ' -> ' + child); // eslint-disable-line prefer-template
+      console.log(
+        `incrementing ${isError ? 'error ' : ''}link ${parent} -> ${child}`,
+      ); // eslint-disable-line prefer-template
     }
     const key = keyString(parent, child);
     this._callCounts[key] = (this._callCounts[key] || 0) + 1;
@@ -81,7 +85,7 @@ export class DependencyLinker {
     const queue = traceTree.queueRootMostSpans();
     while (queue.length > 0) {
       const current = queue.shift();
-      current.children.forEach(n => queue.push(n));
+      current.children.forEach((n) => queue.push(n));
 
       const currentSpan = current.span;
       if (debug) console.log(`processing ${JSON.stringify(currentSpan)}`);
@@ -112,9 +116,11 @@ export class DependencyLinker {
         case 'CONSUMER':
           child = serviceName;
           parent = remoteServiceName;
-          if (current === traceTree) { // we are the root-most span.
+          if (current === traceTree) {
+            // we are the root-most span.
             if (!parent) {
-              if (debug) console.log('The client of the root span is unknown; skipping');
+              if (debug)
+                console.log('The client of the root span is unknown; skipping');
               continue;
             }
           }
@@ -132,7 +138,8 @@ export class DependencyLinker {
       let isError = currentSpan.tags.error !== undefined;
       if (kind === 'PRODUCER' || kind === 'CONSUMER') {
         if (!parent || !child) {
-          if (debug) console.log('cannot link messaging span to its broker; skipping');
+          if (debug)
+            console.log('cannot link messaging span to its broker; skipping');
         } else {
           this._addLink(parent, child, isError);
         }
@@ -142,11 +149,16 @@ export class DependencyLinker {
       // Local spans may be between the current node and its remote parent
       const remoteAncestor = this._firstRemoteAncestor(current);
       let remoteAncestorName;
-      if (remoteAncestor) remoteAncestorName = getServiceName(remoteAncestor.localEndpoint);
+      if (remoteAncestor)
+        remoteAncestorName = getServiceName(remoteAncestor.localEndpoint);
       if (remoteAncestor && remoteAncestorName) {
         // Some users accidentally put the remote service name on client annotations.
         // Check for this and backfill a link from the nearest remote to that service as necessary.
-        if (kind === 'CLIENT' && serviceName && remoteAncestorName !== serviceName) {
+        if (
+          kind === 'CLIENT' &&
+          serviceName &&
+          remoteAncestorName !== serviceName
+        ) {
           if (debug) console.log('detected missing link to client span');
           this._addLink(remoteAncestorName, serviceName, false); // we don't know if it is an error
         }
@@ -155,8 +167,12 @@ export class DependencyLinker {
 
         // When an RPC is split between spans, we skip the child (server side). If our parent is a
         // client, we need to check it for errors.
-        if (!isError && remoteAncestor.kind === 'CLIENT'
-          && currentSpan.parentId && currentSpan.parentId === remoteAncestor.id) {
+        if (
+          !isError &&
+          remoteAncestor.kind === 'CLIENT' &&
+          currentSpan.parentId &&
+          currentSpan.parentId === remoteAncestor.id
+        ) {
           isError = isError || remoteAncestor.tags.error !== undefined;
         }
       }

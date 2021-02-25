@@ -1,8 +1,9 @@
-[![Gitter chat](https://img.shields.io/badge/gitter-join%20chat%20%E2%86%92-brightgreen.svg)](https://gitter.im/openzipkin/zipkin)
-[![Build Status](https://travis-ci.org/openzipkin/zipkin.svg?branch=master)](https://travis-ci.org/openzipkin/zipkin) [![Download](https://api.bintray.com/packages/openzipkin/maven/zipkin/images/download.svg) ](https://bintray.com/openzipkin/maven/zipkin/_latestVersion)
+# zipkin
+
+[![Gitter chat](http://img.shields.io/badge/gitter-join%20chat%20%E2%86%92-brightgreen.svg)](https://gitter.im/openzipkin/zipkin)
+[![Build Status](https://github.com/openzipkin/zipkin/workflows/test/badge.svg)](https://github.com/openzipkin/zipkin/actions?query=workflow%3Atest)
 [![Maven Central](https://img.shields.io/maven-central/v/io.zipkin/zipkin-server.svg)](https://search.maven.org/search?q=g:io.zipkin%20AND%20a:zipkin-server)
 
-# zipkin
 [Zipkin](https://zipkin.io) is a distributed tracing system. It helps gather
 timing data needed to troubleshoot latency problems in service architectures.
 Features include both the collection and lookup of this data.
@@ -14,7 +15,7 @@ percentage of time spent in a service, and whether or not operations failed.
 
 <img src="https://zipkin.io/public/img/web-screenshot.png" alt="Trace view screenshot" />
 
-The Zipkin UI also presents a Dependency diagram showing how many traced
+The Zipkin UI also presents a dependency diagram showing how many traced
 requests went through each application. This can be helpful for identifying
 aggregate behavior including error paths or calls to deprecated services.
 
@@ -38,6 +39,7 @@ java -jar zipkin.jar
 
 You can also start Zipkin via Docker.
 ```bash
+# Note: this is mirrored as ghcr.io/openzipkin/zipkin
 docker run -d -p 9411:9411 openzipkin/zipkin
 ```
 
@@ -45,7 +47,23 @@ Once the server is running, you can view traces with the Zipkin UI at `http://yo
 
 If your applications aren't sending traces, yet, configure them with [Zipkin instrumentation](https://zipkin.io/pages/tracers_instrumentation) or try one of our [examples](https://github.com/openzipkin?utf8=%E2%9C%93&q=example).
 
-Check out the [`zipkin-server`](/zipkin-server) documentation for configuration details, or [`docker-zipkin`](https://github.com/openzipkin/docker-zipkin) for how to use docker-compose.
+Check out the [`zipkin-server`](/zipkin-server) documentation for configuration details, or [Docker examples](docker/examples) for how to use docker-compose.
+
+### Zipkin Slim
+
+The slim build of Zipkin is smaller and starts faster. It supports in-memory and Elasticsearch storage, but doesn't support messaging transports like Kafka or RabbitMQ. If these constraints match your needs, you can try slim like below:
+
+Running via Java:
+```bash
+curl -sSL https://zipkin.io/quickstart.sh | bash -s io.zipkin:zipkin-server:LATEST:slim zipkin.jar
+java -jar zipkin.jar
+```
+
+Running via Docker:
+```bash
+# Note: this is mirrored as ghcr.io/openzipkin/zipkin-slim
+docker run -d -p 9411:9411 openzipkin/zipkin-slim
+```
 
 ## Core Library
 The [core library](zipkin/src/main/java/zipkin2) is used by both Zipkin instrumentation and the Zipkin server. Its minimum Java language level is 6, in efforts to support those writing agent instrumentation.
@@ -73,8 +91,7 @@ Note: The above is just an example, most likely you'll want to use an existing t
 
 ## Storage Component
 Zipkin includes a [StorageComponent](zipkin/src/main/java/zipkin2/storage/StorageComponent.java), used to store and query spans and
-dependency links. This is used by the server and those making custom
-servers, collectors, or span reporters. For this reason, storage
+dependency links. This is used by the server and those making collectors, or span reporters. For this reason, storage
 components have minimal dependencies, but most require Java 8+
 
 Ex.
@@ -159,18 +176,6 @@ This store does not require a [job to aggregate](https://github.com/openzipkin/z
 However, running the job will improve performance of dependencies
 queries.
 
-#### Cassandra
-The [Cassandra v1](zipkin-storage/cassandra-v1) component uses Cassandra
-2.2+ features, but is tested against the latest patch of Cassandra 3.11.
-
-The CQL was written in 2015, based on the original Cassandra schema from
-Twitter, and since been extended. Spans are stored as opaque thrifts,
-which means you cannot query fields in cqlsh. The schema was designed
-for scale, including manually implemented indexes to make querying
-larger data more performant.
-
-Note: This store requires a [job to aggregate](https://github.com/openzipkin/zipkin-dependencies) dependency links.
-
 ## Running the server from source
 The [Zipkin server](zipkin-server) receives spans via HTTP POST and respond to queries
 from its UI. It can also run collectors, such as RabbitMQ or Kafka.
@@ -179,7 +184,7 @@ To run the server from the currently checked out source, enter the
 following. JDK 11 is required to compile the source.
 ```bash
 # Build the server and also make its dependencies
-$ ./mvnw -DskipTests --also-make -pl zipkin-server clean install
+$ ./mvnw -q --batch-mode -DskipTests --also-make -pl zipkin-server clean install
 # Run the server
 $ java -jar ./zipkin-server/target/zipkin-server-*exec.jar
 ```
@@ -189,12 +194,16 @@ Server artifacts are under the maven group id `io.zipkin`
 Library artifacts are under the maven group id `io.zipkin.zipkin2`
 
 ### Library Releases
-Releases are uploaded to [Bintray](https://bintray.com/openzipkin/maven/zipkin) and synchronized to [Maven Central](https://search.maven.org/#search%7Cga%7C1%7Cg%3A%22io.zipkin%22)
+Releases are at [Sonatype](https://oss.sonatype.org/content/repositories/releases) and [Maven Central](http://search.maven.org/#search%7Cga%7C1%7Cg%3A%22io.zipkin%22)
+
 ### Library Snapshots
-Snapshots are uploaded to [JFrog](https://oss.jfrog.org/artifactory/oss-snapshot-local) after commits to master.
+Snapshots are uploaded to [Sonatype](https://oss.sonatype.org/content/repositories/snapshots) after
+commits to master.
+
 ### Docker Images
-Released versions of zipkin-server are published to Docker Hub as `openzipkin/zipkin`.
-See [docker-zipkin](https://github.com/openzipkin/docker-zipkin) for details.
+Released versions of zipkin-server are published to Docker Hub as `openzipkin/zipkin` and GitHub
+Container Registry as `ghcr.io/openzipkin/zipkin`. See [docker](./docker) for details.
+
 ### Javadocs
 https://zipkin.io/zipkin contains versioned folders with JavaDocs published on each (non-PR) build, as well
 as releases.

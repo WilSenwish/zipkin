@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,24 +13,19 @@
  */
 package zipkin2.server.internal;
 
-import com.linecorp.armeria.client.encoding.GzipStreamDecoderFactory;
+import com.linecorp.armeria.client.encoding.StreamDecoderFactory;
 import com.linecorp.armeria.common.AggregatedHttpRequest;
 import com.linecorp.armeria.common.HttpData;
 import com.linecorp.armeria.common.HttpHeaderNames;
 import com.linecorp.armeria.common.HttpRequest;
 import com.linecorp.armeria.common.HttpResponse;
 import com.linecorp.armeria.common.HttpStatus;
-import com.linecorp.armeria.common.MediaType;
-import com.linecorp.armeria.common.RequestContext;
 import com.linecorp.armeria.common.ResponseHeaders;
 import com.linecorp.armeria.server.ServiceRequestContext;
 import com.linecorp.armeria.server.annotation.Consumes;
 import com.linecorp.armeria.server.annotation.ConsumesJson;
 import com.linecorp.armeria.server.annotation.ExceptionHandler;
-import com.linecorp.armeria.server.annotation.ExceptionHandlerFunction;
 import com.linecorp.armeria.server.annotation.Post;
-import io.netty.buffer.ByteBufHolder;
-import io.netty.util.ReferenceCountUtil;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -38,8 +33,8 @@ import java.lang.annotation.Target;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import zipkin2.Callback;
 import zipkin2.Span;
@@ -51,18 +46,16 @@ import zipkin2.collector.CollectorMetrics;
 import zipkin2.collector.CollectorSampler;
 import zipkin2.storage.StorageComponent;
 
-import static com.linecorp.armeria.common.HttpStatus.BAD_REQUEST;
-import static com.linecorp.armeria.common.HttpStatus.INTERNAL_SERVER_ERROR;
 import static zipkin2.Call.propagateIfFatal;
-import static zipkin2.server.internal.BodyIsExceptionMessage.testForUnexpectedFormat;
 
 @ConditionalOnProperty(name = "zipkin.collector.http.enabled", matchIfMissing = true)
 @ExceptionHandler(BodyIsExceptionMessage.class)
 public class ZipkinHttpCollector {
-  static final Logger LOGGER = LogManager.getLogger();
+  static final Logger LOGGER = LoggerFactory.getLogger(ZipkinHttpCollector.class);
   static volatile CollectorMetrics metrics;
   final Collector collector;
 
+  @SuppressWarnings("StaticAssignmentInConstructor")
   ZipkinHttpCollector(
     StorageComponent storage, CollectorSampler sampler, CollectorMetrics metrics) {
     metrics = metrics.forTransport("http");
@@ -113,34 +106,29 @@ public class ZipkinHttpCollector {
     HttpRequest req) {
     CompletableCallback result = new CompletableCallback();
 
-    req.aggregateWithPooledObjects(ctx.contextAwareEventLoop(), ctx.alloc()).handle((msg, t) -> {
+    req.aggregateWithPooledObjects(ctx.eventLoop(), ctx.alloc()).handle((msg, t) -> {
       if (t != null) {
         result.onError(t);
         return null;
       }
 
-      final HttpData content;
+      final HttpData requestContent;
       try {
-        content = UnzippingBytesRequestConverter.convertRequest(ctx, msg);
+        requestContent = UnzippingBytesRequestConverter.convertRequest(ctx, msg);
       } catch (Throwable t1) {
         propagateIfFatal(t1);
         result.onError(t1);
         return null;
       }
 
-      try {
+      try (HttpData content = requestContent) {
         // logging already handled upstream in UnzippingBytesRequestConverter where request context exists
         if (content.isEmpty()) {
           result.onSuccess(null);
           return null;
         }
 
-        final ByteBuffer nioBuffer;
-        if (content instanceof ByteBufHolder) {
-          nioBuffer = ((ByteBufHolder) content).content().nioBuffer();
-        } else {
-          nioBuffer = ByteBuffer.wrap(content.array());
-        }
+        final ByteBuffer nioBuffer = content.byteBuf().nioBuffer();
 
         try {
           SpanBytesDecoderDetector.decoderForListMessage(nioBuffer);
@@ -168,8 +156,6 @@ public class ZipkinHttpCollector {
           result.onError(t1);
           return null;
         }
-      } finally {
-        ReferenceCountUtil.release(content);
       }
 
       return null;
@@ -183,79 +169,6 @@ public class ZipkinHttpCollector {
     LOGGER.debug("{} sent by clientAddress->{}, userAgent->{}",
       prefix, ctx.clientAddress(), request.headers().get(HttpHeaderNames.USER_AGENT)
     );
-  }
-}
-
-@Retention(RetentionPolicy.RUNTIME)
-@Target({ElementType.TYPE, ElementType.METHOD})
-@Consumes("application/x-thrift") @interface ConsumesThrift {
-}
-
-@Retention(RetentionPolicy.RUNTIME)
-@Target({ElementType.TYPE, ElementType.METHOD})
-@Consumes("application/x-protobuf") @interface ConsumesProtobuf {
-}
-
-final class CompletableCallback extends CompletableFuture<HttpResponse>
-  implements Callback<Void> {
-
-  static final ResponseHeaders ACCEPTED_RESPONSE = ResponseHeaders.of(HttpStatus.ACCEPTED);
-
-  @Override public void onSuccess(Void value) {
-    complete(HttpResponse.of(ACCEPTED_RESPONSE));
-  }
-
-  @Override public void onError(Throwable t) {
-    completeExceptionally(t);
-  }
-}
-
-final class UnzippingBytesRequestConverter {
-  static final GzipStreamDecoderFactory GZIP_DECODER_FACTORY = new GzipStreamDecoderFactory();
-
-  static HttpData convertRequest(ServiceRequestContext ctx, AggregatedHttpRequest request) {
-    ZipkinHttpCollector.metrics.incrementMessages();
-    String encoding = request.headers().get(HttpHeaderNames.CONTENT_ENCODING);
-    HttpData content = request.content();
-    if (!content.isEmpty() && encoding != null && encoding.contains("gzip")) {
-      content = GZIP_DECODER_FACTORY.newDecoder(ctx.alloc()).decode(content);
-      // The implementation of the armeria decoder is to return an empty body on failure
-      if (content.isEmpty()) {
-        ZipkinHttpCollector.maybeLog("Malformed gzip body", ctx, request);
-        ReferenceCountUtil.release(content);
-        throw new IllegalArgumentException("Cannot gunzip spans");
-      }
-    }
-
-    if (content.isEmpty()) ZipkinHttpCollector.maybeLog("Empty POST body", ctx, request);
-    if (content.length() == 2 && "[]".equals(content.toStringAscii())) {
-      ZipkinHttpCollector.maybeLog("Empty JSON list POST body", ctx, request);
-      ReferenceCountUtil.release(content);
-      content = HttpData.EMPTY_DATA;
-    }
-
-    ZipkinHttpCollector.metrics.incrementBytes(content.length());
-    return content;
-  }
-}
-
-final class BodyIsExceptionMessage implements ExceptionHandlerFunction {
-
-  static final Logger LOGGER = LogManager.getLogger();
-
-  @Override
-  public HttpResponse handleException(RequestContext ctx, HttpRequest req, Throwable cause) {
-    ZipkinHttpCollector.metrics.incrementMessagesDropped();
-
-    String message = cause.getMessage();
-    if (message == null) message = cause.getClass().getSimpleName();
-    if (cause instanceof IllegalArgumentException) {
-      return HttpResponse.of(BAD_REQUEST, MediaType.ANY_TEXT_TYPE, message);
-    } else {
-      LOGGER.warn("Unexpected error handling request.", cause);
-
-      return HttpResponse.of(INTERNAL_SERVER_ERROR, MediaType.ANY_TEXT_TYPE, message);
-    }
   }
 
   /**
@@ -292,5 +205,57 @@ final class BodyIsExceptionMessage implements ExceptionHandlerFunction {
       return true;
     }
     return false;
+  }
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target({ElementType.TYPE, ElementType.METHOD})
+@Consumes("application/x-thrift") @interface ConsumesThrift {
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target({ElementType.TYPE, ElementType.METHOD})
+@Consumes("application/x-protobuf") @interface ConsumesProtobuf {
+}
+
+final class CompletableCallback extends CompletableFuture<HttpResponse>
+  implements Callback<Void> {
+
+  static final ResponseHeaders ACCEPTED_RESPONSE = ResponseHeaders.of(HttpStatus.ACCEPTED);
+
+  @Override public void onSuccess(Void value) {
+    complete(HttpResponse.of(ACCEPTED_RESPONSE));
+  }
+
+  @Override public void onError(Throwable t) {
+    completeExceptionally(t);
+  }
+}
+
+final class UnzippingBytesRequestConverter {
+
+  static HttpData convertRequest(ServiceRequestContext ctx, AggregatedHttpRequest request) {
+    ZipkinHttpCollector.metrics.incrementMessages();
+    String encoding = request.headers().get(HttpHeaderNames.CONTENT_ENCODING);
+    HttpData content = request.content();
+    if (!content.isEmpty() && encoding != null && encoding.contains("gzip")) {
+      content = StreamDecoderFactory.gzip().newDecoder(ctx.alloc()).decode(content);
+      // The implementation of the armeria decoder is to return an empty body on failure
+      if (content.isEmpty()) {
+        ZipkinHttpCollector.maybeLog("Malformed gzip body", ctx, request);
+        content.close();
+        throw new IllegalArgumentException("Cannot gunzip spans");
+      }
+    }
+
+    if (content.isEmpty()) ZipkinHttpCollector.maybeLog("Empty POST body", ctx, request);
+    if (content.length() == 2 && "[]".equals(content.toStringAscii())) {
+      ZipkinHttpCollector.maybeLog("Empty JSON list POST body", ctx, request);
+      content.close();
+      content = HttpData.empty();
+    }
+
+    ZipkinHttpCollector.metrics.incrementBytes(content.length());
+    return content;
   }
 }

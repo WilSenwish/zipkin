@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -14,8 +14,7 @@
 package zipkin2.server.internal;
 
 import com.linecorp.armeria.client.ClientFactory;
-import com.linecorp.armeria.client.ClientFactoryBuilder;
-import com.linecorp.armeria.client.HttpClient;
+import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
 import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.SessionProtocol;
@@ -39,8 +38,9 @@ import static zipkin2.server.internal.elasticsearch.Access.configureSsl;
  */
 @SpringBootTest(
   classes = ZipkinServer.class,
-  webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+  webEnvironment = SpringBootTest.WebEnvironment.NONE, // RANDOM_PORT requires spring-web
   properties = {
+    "server.port=0",
     "spring.config.name=zipkin-server",
     // TODO: use normal spring.server properties after https://github.com/line/armeria/issues/1834
     "armeria.ssl.enabled=true",
@@ -64,7 +64,7 @@ public class ITZipkinServerSsl {
   ClientFactory clientFactory;
 
   @Before public void configureClientFactory() {
-    clientFactory = configureSsl(new ClientFactoryBuilder(), armeriaSettings.getSsl()).build();
+    clientFactory = configureSsl(ClientFactory.builder(), armeriaSettings.getSsl()).build();
   }
 
   @Test public void callHealthEndpoint_HTTP() {
@@ -76,9 +76,10 @@ public class ITZipkinServerSsl {
   }
 
   void callHealthEndpoint(SessionProtocol http) {
-    AggregatedHttpResponse response = HttpClient.of(clientFactory, baseUrl(server, http))
-      .get("/health")
-      .aggregate().join();
+    AggregatedHttpResponse response =
+      WebClient.builder(baseUrl(server, http)).factory(clientFactory).build()
+        .get("/health")
+        .aggregate().join();
 
     assertThat(response.status()).isEqualTo(HttpStatus.OK);
   }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -12,7 +12,7 @@
  * the License.
  */
 import { ensureV2TraceData } from './trace';
-import v2Trace from '../test/data/netflix';
+import v2Trace from '../../testdata/yelp.json';
 
 describe('ensureV2', () => {
   it('does not throw on v2 format', () => {
@@ -44,7 +44,9 @@ describe('ensureV2', () => {
       error = err;
     }
 
-    expect(error.message).toEqual('List<Span> implies at least traceId and id fields');
+    expect(error.message).toEqual(
+      'List<Span> implies at least traceId and id fields',
+    );
 
     try {
       ensureV2TraceData([{ id: 'b' }]);

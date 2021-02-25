@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,14 +13,13 @@
  */
 package zipkin2.storage;
 
-import java.io.IOException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import zipkin2.Span;
 
-import static java.util.Arrays.asList;
 import static org.assertj.core.api.Assertions.assertThat;
-import static zipkin2.TestObjects.CLIENT_SPAN;
-import static zipkin2.storage.ITSpanStore.requestBuilder;
+import static zipkin2.TestObjects.newClientSpan;
+import static zipkin2.TestObjects.spanBuilder;
 
 /**
  * Base test for when {@link StorageComponent.Builder#searchEnabled(boolean) searchEnabled ==
@@ -34,48 +33,49 @@ public abstract class ITSearchEnabledFalse<T extends StorageComponent> extends I
     storage.searchEnabled(false);
   }
 
-  @Test void getTraces_indexDataReturnsNothing() throws Exception {
-    accept(CLIENT_SPAN);
+  @Test protected void getTraces_indexDataReturnsNothing(TestInfo testInfo) throws Exception {
+    String testSuffix = testSuffix(testInfo);
+    Span clientSpan = newClientSpan(testSuffix);
+    accept(clientSpan);
 
-    assertThat(store().getTraces(requestBuilder()
-      .build()).execute()).isEmpty();
+    assertGetTracesReturnsEmpty(
+      requestBuilder().build());
 
-    assertThat(store().getTraces(requestBuilder()
-      .serviceName(CLIENT_SPAN.localServiceName())
-      .build()).execute()).isEmpty();
+    assertGetTracesReturnsEmpty(
+      requestBuilder().serviceName(clientSpan.localServiceName()).build());
 
-    assertThat(store().getTraces(requestBuilder()
-      .spanName(CLIENT_SPAN.name())
-      .build()).execute()).isEmpty();
+    assertGetTracesReturnsEmpty(
+      requestBuilder().spanName(clientSpan.name()).build());
 
-    assertThat(store().getTraces(requestBuilder()
-      .annotationQuery(CLIENT_SPAN.tags())
-      .build()).execute()).isEmpty();
+    assertGetTracesReturnsEmpty(
+      requestBuilder().annotationQuery(clientSpan.tags()).build());
 
-    assertThat(store().getTraces(requestBuilder()
-      .minDuration(CLIENT_SPAN.duration())
-      .build()).execute()).isEmpty();
+    assertGetTracesReturnsEmpty(
+      requestBuilder().minDuration(clientSpan.duration()).build());
   }
 
-  @Test void getServiceNames_isEmpty() throws Exception {
-    accept(CLIENT_SPAN);
+  @Test protected void getServiceNames_isEmpty(TestInfo testInfo) throws Exception {
+    String testSuffix = testSuffix(testInfo);
+    accept(spanBuilder(testSuffix).build());
 
     assertThat(names().getServiceNames().execute()).isEmpty();
   }
 
-  @Test void getRemoteServiceNames_isEmpty() throws Exception {
-    accept(CLIENT_SPAN);
+  @Test protected void getRemoteServiceNames_isEmpty(TestInfo testInfo) throws Exception {
+    String testSuffix = testSuffix(testInfo);
+    Span span = spanBuilder(testSuffix).build();
 
-    assertThat(names().getRemoteServiceNames(CLIENT_SPAN.localServiceName()).execute()).isEmpty();
+    accept(span);
+
+    assertThat(names().getRemoteServiceNames(span.localServiceName()).execute()).isEmpty();
   }
 
-  @Test void getSpanNames_isEmpty() throws Exception {
-    accept(CLIENT_SPAN);
+  @Test protected void getSpanNames_isEmpty(TestInfo testInfo) throws Exception {
+    String testSuffix = testSuffix(testInfo);
+    Span span = spanBuilder(testSuffix).build();
 
-    assertThat(names().getSpanNames(CLIENT_SPAN.localServiceName()).execute()).isEmpty();
-  }
+    accept(span);
 
-  protected void accept(Span... spans) throws IOException {
-    storage.spanConsumer().accept(asList(spans)).execute();
+    assertThat(names().getSpanNames(span.localServiceName()).execute()).isEmpty();
   }
 }

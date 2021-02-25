@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,29 +13,35 @@
  */
 package zipkin2.storage.cassandra;
 
-import com.datastax.driver.core.LocalDate;
 import java.math.BigInteger;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.TreeMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import zipkin2.Annotation;
 import zipkin2.Call;
 import zipkin2.Span;
 import zipkin2.internal.DateUtil;
 import zipkin2.internal.Nullable;
-import zipkin2.internal.Platform;
+import zipkin2.internal.RecyclableBuffers;
 import zipkin2.storage.QueryRequest;
 
-import static zipkin2.internal.Platform.SHORT_STRING_LENGTH;
+import static zipkin2.internal.RecyclableBuffers.SHORT_STRING_LENGTH;
 
 final class CassandraUtil {
+  static final Logger LOG = LoggerFactory.getLogger(CassandraUtil.class);
+
   /**
    * Time window covered by a single bucket of the {@link Schema#TABLE_TRACE_BY_SERVICE_SPAN} and
    * {@link Schema#TABLE_TRACE_BY_SERVICE_REMOTE_SERVICE}, in seconds. Default: 1 day
@@ -51,14 +57,14 @@ final class CassandraUtil {
   /**
    * Returns a set of annotation getValues and tags joined on equals, delimited by ░
    *
-   * <p>Values over {@link Platform#SHORT_STRING_LENGTH} are not considered. Zipkin's {@link
-   * QueryRequest#annotationQuery()} are equals match. Not all values are lookup values. For
+   * <p>Values over {@link RecyclableBuffers#SHORT_STRING_LENGTH} are not considered. Zipkin's
+   * {@link QueryRequest#annotationQuery()} are equals match. Not all values are lookup values. For
    * example, {@code sql.query} isn't something that is likely to be looked up by value and indexing
    * that could add a potentially kilobyte partition key on {@link Schema#TABLE_SPAN}
    *
    * @see QueryRequest#annotationQuery()
    */
-  static @Nullable String annotationQuery(Span span) {
+  @Nullable static String annotationQuery(Span span) {
     if (span.annotations().isEmpty() && span.tags().isEmpty()) return null;
 
     char delimiter = '░'; // as very unlikely to be in the query
@@ -97,11 +103,10 @@ final class CassandraUtil {
   enum TraceIdsSortedByDescTimestamp implements Call.Mapper<Map<String, Long>, Set<String>> {
     INSTANCE;
 
-    @Override
-    public Set<String> map(Map<String, Long> map) {
+    @Override public Set<String> map(Map<String, Long> map) {
       // timestamps can collide, so we need to add some random digits on end before using them as
       // serviceSpanKeys
-      SortedMap<BigInteger, String> sorted = new TreeMap<>(Collections.reverseOrder());
+      TreeMap<BigInteger, String> sorted = new TreeMap<>(Collections.reverseOrder());
       for (Map.Entry<String, Long> entry : map.entrySet()) {
         BigInteger uncollided =
           BigInteger.valueOf(entry.getValue())
@@ -112,8 +117,7 @@ final class CassandraUtil {
       return new LinkedHashSet<>(sorted.values());
     }
 
-    @Override
-    public String toString() {
+    @Override public String toString() {
       return "TraceIdsSortedByDescTimestamp";
     }
 
@@ -123,9 +127,18 @@ final class CassandraUtil {
 
   static List<LocalDate> getDays(long endTs, @Nullable Long lookback) {
     List<LocalDate> result = new ArrayList<>();
-    for (Date javaDate : DateUtil.getDays(endTs, lookback)) {
-      result.add(LocalDate.fromMillisSinceEpoch(javaDate.getTime()));
+    for (long epochMillis : DateUtil.epochDays(endTs, lookback)) {
+      result.add(Instant.ofEpochMilli(epochMillis).atZone(ZoneOffset.UTC).toLocalDate());
     }
     return result;
+  }
+
+  @Nullable static InetAddress inetAddressOrNull(@Nullable String string, @Nullable byte[] bytes) {
+    try {
+      return bytes == null ? null : InetAddress.getByAddress(bytes);
+    } catch (UnknownHostException e) {
+      LOG.debug("InetAddress.getByAddress failed with input {}: {}", string, e.getMessage());
+      return null;
+    }
   }
 }

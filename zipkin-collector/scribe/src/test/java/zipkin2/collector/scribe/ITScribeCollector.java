@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,6 +13,7 @@
  */
 package zipkin2.collector.scribe;
 
+import com.linecorp.armeria.common.CommonPools;
 import java.util.Base64;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -21,9 +22,9 @@ import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import zipkin2.Callback;
 import zipkin2.Span;
 import zipkin2.TestObjects;
@@ -42,20 +43,18 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-public class ITScribeCollector {
+class ITScribeCollector {
+  static Collector collector;
+  static CollectorMetrics metrics;
+  static NettyScribeServer server;
 
-  private static Collector collector;
-  private static CollectorMetrics metrics;
-
-  private static NettyScribeServer server;
-
-  @BeforeClass public static void startServer() {
+  @BeforeAll static void startServer() {
     collector = mock(Collector.class);
     doAnswer(invocation -> {
       Callback<Void> callback = invocation.getArgument(1);
       callback.onSuccess(null);
       return null;
-    }).when(collector).accept(any(), any());
+    }).when(collector).accept(any(), any(), any());
 
     metrics = mock(CollectorMetrics.class);
 
@@ -63,11 +62,11 @@ public class ITScribeCollector {
     server.start();
   }
 
-  @AfterClass public static void stopServer() {
+  @AfterAll static void stopServer() {
     server.close();
   }
 
-  @Test public void normal() throws Exception {
+  @Test void normal() throws Exception {
     // Java version of this sample code
     // https://github.com/facebookarchive/scribe/wiki/Logging-Messages
     TTransport transport = new TFramedTransport(new TSocket("localhost", server.port()));
@@ -89,11 +88,12 @@ public class ITScribeCollector {
       transport.close();
     }
 
-    verify(collector, times(2)).accept(eq(TestObjects.TRACE), any());
+    verify(collector, times(2)).accept(eq(TestObjects.TRACE), any(),
+      eq(CommonPools.blockingTaskExecutor()));
     verify(metrics, times(2)).incrementMessages();
   }
 
-  private static LogEntry logEntry(Span span) {
+  static LogEntry logEntry(Span span) {
     return new LogEntry()
       .setCategory("zipkin")
       .setMessage(Base64.getMimeEncoder().encodeToString(SpanBytesEncoder.THRIFT.encode(span)));

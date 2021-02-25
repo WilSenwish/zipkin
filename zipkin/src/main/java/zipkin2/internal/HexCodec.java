@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -35,7 +35,7 @@ public final class HexCodec {
 
   /**
    * Parses a 16 character lower-hex string with no prefix into an unsigned long, starting at the
-   * spe index.
+   * specified index.
    */
   public static long lowerHexToUnsignedLong(String lowerHex, int index) {
     long result = 0;

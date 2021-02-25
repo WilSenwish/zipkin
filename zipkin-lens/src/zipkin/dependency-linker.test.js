@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -15,18 +15,39 @@ import { DependencyLinker } from './dependency-linker';
 import { SpanNodeBuilder } from './span-node';
 
 const debug = false; // switch to enable console output during tests
+// in reverse order as reporting is more likely to occur this way
 const trace = [
   {
-    traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'web' },
+    traceId: 'a',
+    parentId: 'b',
+    id: 'c',
+    kind: 'CLIENT',
+    localEndpoint: { serviceName: 'app' },
+    remoteEndpoint: { serviceName: 'db' },
+    tags: { error: true },
   },
   {
-    traceId: 'a', parentId: 'a', id: 'b', kind: 'CLIENT', localEndpoint: { serviceName: 'web' }, remoteEndpoint: { serviceName: 'app' },
+    traceId: 'a',
+    parentId: 'a',
+    id: 'b',
+    kind: 'SERVER',
+    localEndpoint: { serviceName: 'app' },
+    remoteEndpoint: { serviceName: 'web' },
+    shared: true,
   },
   {
-    traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'app' }, remoteEndpoint: { serviceName: 'web' }, shared: true,
+    traceId: 'a',
+    parentId: 'a',
+    id: 'b',
+    kind: 'CLIENT',
+    localEndpoint: { serviceName: 'web' },
+    remoteEndpoint: { serviceName: 'app' },
   },
   {
-    traceId: 'a', parentId: 'b', id: 'c', kind: 'CLIENT', localEndpoint: { serviceName: 'app' }, remoteEndpoint: { serviceName: 'db' }, tags: { error: true },
+    traceId: 'a',
+    id: 'a',
+    kind: 'SERVER',
+    localEndpoint: { serviceName: 'web' },
   },
 ];
 
@@ -52,7 +73,10 @@ describe('DependencyLinker', () => {
     expect(dependencyLinker.link()).toEqual([
       { parent: 'web', child: 'app', callCount: 1 },
       {
-        parent: 'app', child: 'db', callCount: 1, errorCount: 1,
+        parent: 'app',
+        child: 'db',
+        callCount: 1,
+        errorCount: 1,
       },
     ]);
   });
@@ -64,43 +88,74 @@ describe('DependencyLinker', () => {
     expect(dependencyLinker.link()).toEqual([
       { parent: 'web', child: 'app', callCount: 2 },
       {
-        parent: 'app', child: 'db', callCount: 2, errorCount: 2,
+        parent: 'app',
+        child: 'db',
+        callCount: 2,
+        errorCount: 2,
+      },
+    ]);
+  });
+
+  function withLateParent() {
+    const result = trace.slice(0);
+    const missingParent = { ...trace[2] };
+    delete missingParent.parentId;
+    result[2] = missingParent;
+    return result;
+  }
+
+  /*
+   * This test shows that if a parent ID is stored late (ex because it wasn't propagated), the span
+   * can resolve once it is.
+   */
+  it('should link spans when server is missing its parentId', () => {
+    putTrace(withLateParent());
+
+    expect(dependencyLinker.link()).toEqual([
+      { parent: 'web', child: 'app', callCount: 1 },
+      {
+        parent: 'app',
+        child: 'db',
+        callCount: 1,
+        errorCount: 1,
       },
     ]);
   });
 
   /*
-   * Some don't propagate the server's parent ID which creates a race condition. Try to unwind it.
-   *
-   * <p>See https://github.com/openzipkin/zipkin/pull/1745
+   * This test shows that if a parent ID is stored late (ex because it wasn't propagated), the span
+   * can resolve even if the client side is never sent.
    */
-  it('should link spans when server is missing its parentId', () => {
-    // this trace is intentionally in reverse order.
-    putTrace([
-      // below the parent ID is null as it wasn't propagated
-      {
-        traceId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'app' }, shared: true,
-      },
-      {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CLIENT', localEndpoint: { serviceName: 'web' },
-      },
-      {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'web' },
-      },
-    ]);
+  it('should link spans when client it never sent', () => {
+    putTrace(withLateParent().filter((s) => s !== trace[1])); // client span never sent
 
     expect(dependencyLinker.link()).toEqual([
       { parent: 'web', child: 'app', callCount: 1 },
+      {
+        parent: 'app',
+        child: 'db',
+        callCount: 1,
+        errorCount: 1,
+      },
     ]);
   });
 
   it('should link messaging spans by broker', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'PRODUCER', localEndpoint: { serviceName: 'producer' }, remoteEndpoint: { serviceName: 'kafka' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'PRODUCER',
+        localEndpoint: { serviceName: 'producer' },
+        remoteEndpoint: { serviceName: 'kafka' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CONSUMER', localEndpoint: { serviceName: 'consumer' }, remoteEndpoint: { serviceName: 'kafka' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CONSUMER',
+        localEndpoint: { serviceName: 'consumer' },
+        remoteEndpoint: { serviceName: 'kafka' },
       },
     ]);
 
@@ -113,10 +168,19 @@ describe('DependencyLinker', () => {
   it('should not conflate messaging when they have different brokers', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'PRODUCER', localEndpoint: { serviceName: 'producer' }, remoteEndpoint: { serviceName: 'kafka1' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'PRODUCER',
+        localEndpoint: { serviceName: 'producer' },
+        remoteEndpoint: { serviceName: 'kafka1' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CONSUMER', localEndpoint: { serviceName: 'consumer' }, remoteEndpoint: { serviceName: 'kafka2' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CONSUMER',
+        localEndpoint: { serviceName: 'consumer' },
+        remoteEndpoint: { serviceName: 'kafka2' },
       },
     ]);
 
@@ -129,10 +193,17 @@ describe('DependencyLinker', () => {
   it('should not link messaging spans missing broker', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'PRODUCER', localEndpoint: { serviceName: 'producer' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'PRODUCER',
+        localEndpoint: { serviceName: 'producer' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CONSUMER', localEndpoint: { serviceName: 'consumer' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CONSUMER',
+        localEndpoint: { serviceName: 'consumer' },
       },
     ]);
 
@@ -143,10 +214,18 @@ describe('DependencyLinker', () => {
   it('should not link producer spans when missing broker', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'PRODUCER', localEndpoint: { serviceName: 'producer' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'PRODUCER',
+        localEndpoint: { serviceName: 'producer' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CONSUMER', localEndpoint: { serviceName: 'consumer' }, remoteEndpoint: { serviceName: 'kafka' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CONSUMER',
+        localEndpoint: { serviceName: 'consumer' },
+        remoteEndpoint: { serviceName: 'kafka' },
       },
     ]);
 
@@ -158,10 +237,18 @@ describe('DependencyLinker', () => {
   it('should not link consumer spans when missing broker', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'PRODUCER', localEndpoint: { serviceName: 'producer' }, remoteEndpoint: { serviceName: 'kafka' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'PRODUCER',
+        localEndpoint: { serviceName: 'producer' },
+        remoteEndpoint: { serviceName: 'kafka' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CONSUMER', localEndpoint: { serviceName: 'consumer' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CONSUMER',
+        localEndpoint: { serviceName: 'consumer' },
       },
     ]);
 
@@ -174,10 +261,17 @@ describe('DependencyLinker', () => {
   it('should interpret producer -> server as RPC', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'PRODUCER', localEndpoint: { serviceName: 'producer' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'PRODUCER',
+        localEndpoint: { serviceName: 'producer' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'server' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
       },
     ]);
 
@@ -193,10 +287,17 @@ describe('DependencyLinker', () => {
   it('should interpret producer -> server as RPC, even sharing ID', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'PRODUCER', localEndpoint: { serviceName: 'producer' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'PRODUCER',
+        localEndpoint: { serviceName: 'producer' },
       },
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'server' }, shared: true,
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
+        shared: true,
       },
     ]);
 
@@ -212,10 +313,17 @@ describe('DependencyLinker', () => {
   it('should not interpret client as producer', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'client' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'client' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CONSUMER', localEndpoint: { serviceName: 'consumer' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CONSUMER',
+        localEndpoint: { serviceName: 'consumer' },
       },
     ]);
 
@@ -229,10 +337,19 @@ describe('DependencyLinker', () => {
   it('should link spans directed by kind', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'server' }, remoteEndpoint: { serviceName: 'client' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
+        remoteEndpoint: { serviceName: 'client' },
       },
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'client' }, remoteEndpoint: { serviceName: 'server' }, shared: true,
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'client' },
+        remoteEndpoint: { serviceName: 'server' },
+        shared: true,
       },
     ]);
 
@@ -244,13 +361,26 @@ describe('DependencyLinker', () => {
   it('link calls to uninstrumented servers', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' }, remoteEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
+        remoteEndpoint: { serviceName: 'backend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'c', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' }, remoteEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'c',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
+        remoteEndpoint: { serviceName: 'backend' },
       },
     ]);
 
@@ -262,19 +392,36 @@ describe('DependencyLinker', () => {
   it('link calls to uninstrumented servers, including errors', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' }, remoteEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
+        remoteEndpoint: { serviceName: 'backend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'c', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' }, remoteEndpoint: { serviceName: 'backend' }, tags: { error: '' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'c',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
+        remoteEndpoint: { serviceName: 'backend' },
+        tags: { error: '' },
       },
     ]);
 
     expect(dependencyLinker.link()).toEqual([
       {
-        parent: 'frontend', child: 'backend', callCount: 2, errorCount: 1,
+        parent: 'frontend',
+        child: 'backend',
+        callCount: 2,
+        errorCount: 1,
       },
     ]);
   });
@@ -282,19 +429,34 @@ describe('DependencyLinker', () => {
   it('link incoming calls, using last RPC parent as service name', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'backend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'c', kind: 'SERVER', localEndpoint: { serviceName: 'backend' }, tags: { error: '' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'c',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'backend' },
+        tags: { error: '' },
       },
     ]);
 
     expect(dependencyLinker.link()).toEqual([
       {
-        parent: 'frontend', child: 'backend', callCount: 2, errorCount: 1,
+        parent: 'frontend',
+        child: 'backend',
+        callCount: 2,
+        errorCount: 1,
       },
     ]);
   });
@@ -306,10 +468,17 @@ describe('DependencyLinker', () => {
   it('should link single host spans as one call', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'client' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'client' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'server' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
       },
     ]);
 
@@ -321,16 +490,28 @@ describe('DependencyLinker', () => {
   it('should link single host spans as one error', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'client' }, tags: { error: '' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'client' },
+        tags: { error: '' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'server' }, tags: { error: '' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
+        tags: { error: '' },
       },
     ]);
 
     expect(dependencyLinker.link()).toEqual([
       {
-        parent: 'client', child: 'server', callCount: 1, errorCount: 1,
+        parent: 'client',
+        child: 'server',
+        callCount: 1,
+        errorCount: 1,
       },
     ]);
   });
@@ -338,16 +519,28 @@ describe('DependencyLinker', () => {
   it('should link shared RPC span as one error', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'client' }, tags: { error: '' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'client' },
+        tags: { error: '' },
       },
       {
-        traceId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'server' }, tags: { error: '' }, shared: true,
+        traceId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
+        tags: { error: '' },
+        shared: true,
       },
     ]);
 
     expect(dependencyLinker.link()).toEqual([
       {
-        parent: 'client', child: 'server', callCount: 1, errorCount: 1,
+        parent: 'client',
+        child: 'server',
+        callCount: 1,
+        errorCount: 1,
       },
     ]);
   });
@@ -355,16 +548,26 @@ describe('DependencyLinker', () => {
   it('should prefer server name in RPC link', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'client' }, remoteEndpoint: { serviceName: 'elephant' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'client' },
+        remoteEndpoint: { serviceName: 'elephant' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'server' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
       },
     ]);
 
     expect(dependencyLinker.link()).toEqual([
       {
-        parent: 'client', child: 'server', callCount: 1,
+        parent: 'client',
+        child: 'server',
+        callCount: 1,
       },
     ]);
   });
@@ -376,16 +579,31 @@ describe('DependencyLinker', () => {
   it('tolerates missing localEndpoint between server and client', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b',
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
       },
       {
-        traceId: 'a', parentId: 'b', id: 'c', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' }, remoteEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'c',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
+        remoteEndpoint: { serviceName: 'backend' },
       },
       {
-        traceId: 'a', parentId: 'b', id: 'd', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' }, remoteEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'd',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
+        remoteEndpoint: { serviceName: 'backend' },
       },
     ]);
 
@@ -397,13 +615,25 @@ describe('DependencyLinker', () => {
   it('should not link leaf nodes when remote service name is unknown', () => {
     putTrace([
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'b', id: 'c', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'c',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'b', id: 'd', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'd',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
       },
     ]);
 
@@ -413,16 +643,29 @@ describe('DependencyLinker', () => {
   it('should create links when missing intermediate endpoint data', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', // possibly missing client/server span
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b', // possibly missing client/server span
       },
       {
-        traceId: 'a', parentId: 'b', id: 'c', kind: 'CLIENT', localEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'c',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'backend' },
       },
       {
-        traceId: 'a', parentId: 'b', id: 'd', kind: 'CLIENT', localEndpoint: { serviceName: 'backend' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'd',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'backend' },
       },
     ]);
 
@@ -434,14 +677,28 @@ describe('DependencyLinker', () => {
   it('should not attribute errors from uninstrumented links', () => {
     putTrace([
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
       },
       // missing rpc span between here
       {
-        traceId: 'a', parentId: 'b', id: 'c', kind: 'CLIENT', localEndpoint: { serviceName: 'backend' }, tags: { error: '' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'c',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'backend' },
+        tags: { error: '' },
       },
       {
-        traceId: 'a', parentId: 'b', id: 'd', kind: 'CLIENT', localEndpoint: { serviceName: 'backend' }, tags: { error: '' },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'd',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'backend' },
+        tags: { error: '' },
       },
     ]);
 
@@ -454,16 +711,27 @@ describe('DependencyLinker', () => {
   it('should not count annotation error as errorCount', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'client' }, annotations: [{ timestamp: 1, value: 'error' }],
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'client' },
+        annotations: [{ timestamp: 1, value: 'error' }],
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'server' }, annotations: [{ timestamp: 1, value: 'error' }],
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server' },
+        annotations: [{ timestamp: 1, value: 'error' }],
       },
     ]);
 
     expect(dependencyLinker.link()).toEqual([
       {
-        parent: 'client', child: 'server', callCount: 1,
+        parent: 'client',
+        child: 'server',
+        callCount: 1,
       },
     ]);
   });
@@ -471,10 +739,17 @@ describe('DependencyLinker', () => {
   it('should link loopback', () => {
     putTrace([
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', parentId: 'a', id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'frontend' },
       },
     ]);
 
@@ -486,17 +761,29 @@ describe('DependencyLinker', () => {
   it('should treat remote service names missing kind as RPC', () => {
     putTrace([
       {
-        traceId: 'a', parentId: 'a', id: 'b', localEndpoint: { serviceName: 'web' }, remoteEndpoint: { serviceName: 'app' },
+        traceId: 'a',
+        parentId: 'a',
+        id: 'b',
+        localEndpoint: { serviceName: 'web' },
+        remoteEndpoint: { serviceName: 'app' },
       },
       {
-        traceId: 'a', parentId: 'b', id: 'c', localEndpoint: { serviceName: 'app' }, remoteEndpoint: { serviceName: 'db' }, tags: { error: true },
+        traceId: 'a',
+        parentId: 'b',
+        id: 'c',
+        localEndpoint: { serviceName: 'app' },
+        remoteEndpoint: { serviceName: 'db' },
+        tags: { error: true },
       },
     ]);
 
     expect(dependencyLinker.link()).toEqual([
       { parent: 'web', child: 'app', callCount: 1 },
       {
-        parent: 'app', child: 'db', callCount: 1, errorCount: 1,
+        parent: 'app',
+        child: 'db',
+        callCount: 1,
+        errorCount: 1,
       },
     ]);
   });
@@ -505,22 +792,38 @@ describe('DependencyLinker', () => {
   it('should not link root RPC spans missing both service names', () => {
     [
       {
-        traceId: 'a', id: 'a', kind: 'SERVER',
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
       },
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', id: 'a', kind: 'SERVER', remoteEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'SERVER',
+        remoteEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT',
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
       },
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', localEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'frontend' },
       },
       {
-        traceId: 'a', id: 'a', kind: 'CLIENT', remoteEndpoint: { serviceName: 'frontend' },
+        traceId: 'a',
+        id: 'a',
+        kind: 'CLIENT',
+        remoteEndpoint: { serviceName: 'frontend' },
       },
     ].forEach((root) => {
       putTrace([root]);
@@ -532,10 +835,18 @@ describe('DependencyLinker', () => {
     const parentId = 'a'; // missing
     putTrace([
       {
-        traceId: 'a', parentId, id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'server1' },
+        traceId: 'a',
+        parentId,
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server1' },
       },
       {
-        traceId: 'a', parentId, id: 'c', kind: 'SERVER', localEndpoint: { serviceName: 'server2' },
+        traceId: 'a',
+        parentId,
+        id: 'c',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'server2' },
       },
     ]);
 
@@ -546,10 +857,21 @@ describe('DependencyLinker', () => {
     const parentId = 'a'; // missing
     putTrace([
       {
-        traceId: 'a', parentId, id: 'b', kind: 'CLIENT', localEndpoint: { serviceName: 'web' }, remoteEndpoint: { serviceName: 'app' },
+        traceId: 'a',
+        parentId,
+        id: 'b',
+        kind: 'CLIENT',
+        localEndpoint: { serviceName: 'web' },
+        remoteEndpoint: { serviceName: 'app' },
       },
       {
-        traceId: 'a', parentId, id: 'b', kind: 'SERVER', localEndpoint: { serviceName: 'app' }, remoteEndpoint: { serviceName: 'web' }, shared: true,
+        traceId: 'a',
+        parentId,
+        id: 'b',
+        kind: 'SERVER',
+        localEndpoint: { serviceName: 'app' },
+        remoteEndpoint: { serviceName: 'web' },
+        shared: true,
       },
     ]);
 

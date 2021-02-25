@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -52,7 +52,7 @@ final class KafkaCollectorWorker implements Runnable {
   final List<String> topics;
   final Collector collector;
   final CollectorMetrics metrics;
-  /** Kafka topic partitions currently assigned to this worker. List is not modifiable. */
+  // added for integration tests only, see ITKafkaCollector
   final AtomicReference<List<TopicPartition>> assignedPartitions =
       new AtomicReference<>(Collections.emptyList());
   final AtomicBoolean running = new AtomicBoolean(true);
@@ -66,12 +66,15 @@ final class KafkaCollectorWorker implements Runnable {
 
   @Override
   public void run() {
-    try (KafkaConsumer kafkaConsumer = new KafkaConsumer<>(properties)) {
+    try (KafkaConsumer<byte[], byte[]> kafkaConsumer = new KafkaConsumer<>(properties)) {
       kafkaConsumer.subscribe(
         topics,
+        // added for integration tests only, see ITKafkaCollector
         new ConsumerRebalanceListener() {
           @Override
           public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+            // technically we should remove only the revoked partitions but for test purposes it
+            // does not matter
             assignedPartitions.set(Collections.emptyList());
           }
 
@@ -80,7 +83,7 @@ final class KafkaCollectorWorker implements Runnable {
             assignedPartitions.set(Collections.unmodifiableList(new ArrayList<>(partitions)));
           }
         });
-      LOG.info("Kafka consumer starting polling loop.");
+      LOG.debug("Kafka consumer starting polling loop.");
       while (running.get()) {
         final ConsumerRecords<byte[], byte[]> consumerRecords = kafkaConsumer.poll(Duration.of(1000, ChronoUnit.MILLIS));
         LOG.debug("Kafka polling returned batch of {} messages.", consumerRecords.count());
@@ -114,7 +117,7 @@ final class KafkaCollectorWorker implements Runnable {
       LOG.warn("Unexpected error in polling loop spans", e);
       throw e;
     } finally {
-      LOG.info("Kafka consumer polling loop stopped. Kafka consumer closed.");
+      LOG.debug("Kafka consumer polling loop stopped. Kafka consumer closed.");
     }
   }
 

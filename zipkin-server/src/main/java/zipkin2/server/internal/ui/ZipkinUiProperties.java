@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -19,16 +19,19 @@ import org.springframework.util.StringUtils;
 
 @ConfigurationProperties("zipkin.ui")
 class ZipkinUiProperties {
+  // TODO: this isn't honored in lens https://github.com/openzipkin/zipkin/issues/2519
   static final String DEFAULT_BASEPATH = "/zipkin";
 
-  private String environment;
+  private String environment = "";
   private int queryLimit = 10;
   private int defaultLookback = (int) TimeUnit.DAYS.toMillis(7);
   private String instrumented = ".*";
   private String logsUrl = null;
+  private String supportUrl = null;
+  private String archivePostUrl = null;
+  private String archiveUrl = null;
   private String basepath = DEFAULT_BASEPATH;
   private boolean searchEnabled = true;
-  private boolean suggestLens = true;
   private Dependency dependency = new Dependency();
 
   public int getDefaultLookback() {
@@ -67,9 +70,41 @@ class ZipkinUiProperties {
     return logsUrl;
   }
 
+  public String getArchivePostUrl() {
+    return archivePostUrl;
+  }
+
+
+  public String getArchiveUrl() {
+    return archiveUrl;
+  }
+
   public void setLogsUrl(String logsUrl) {
     if (!StringUtils.isEmpty(logsUrl)) {
       this.logsUrl = logsUrl;
+    }
+  }
+
+  public String getSupportUrl() {
+    return supportUrl;
+  }
+
+  public void setSupportUrl(String supportUrl) {
+    if (!StringUtils.isEmpty(supportUrl)) {
+      this.supportUrl = supportUrl;
+    }
+
+  }
+
+  public void setArchivePostUrl(String archivePostUrl) {
+    if (!StringUtils.isEmpty(archivePostUrl)) {
+      this.archivePostUrl = archivePostUrl;
+    }
+  }
+
+  public void setArchiveUrl(String archiveUrl) {
+    if (!StringUtils.isEmpty(archiveUrl)) {
+      this.archiveUrl = archiveUrl;
     }
   }
 
@@ -97,17 +132,18 @@ class ZipkinUiProperties {
     this.basepath = basepath;
   }
 
-  public boolean isSuggestLens() {
-    return suggestLens;
-  }
-
-  public void setSuggestLens(boolean suggestLens) {
-    this.suggestLens = suggestLens;
-  }
-
   public static class Dependency {
+    private boolean enabled = true;
     private float lowErrorRate = 0.5f; // 50% of calls in error turns line yellow
     private float highErrorRate = 0.75f; // 75% of calls in error turns line red
+
+    public boolean isEnabled() {
+      return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+      this.enabled = enabled;
+    }
 
     public float getLowErrorRate() {
       return lowErrorRate;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -16,8 +16,8 @@ package zipkin2.elasticsearch.internal.client;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.linecorp.armeria.client.Clients;
-import com.linecorp.armeria.client.HttpClient;
 import com.linecorp.armeria.client.UnprocessedRequestException;
+import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.AggregatedHttpRequest;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
 import com.linecorp.armeria.common.HttpData;
@@ -31,10 +31,6 @@ import com.linecorp.armeria.common.RequestContext;
 import com.linecorp.armeria.common.RequestHeaders;
 import com.linecorp.armeria.common.util.Exceptions;
 import com.linecorp.armeria.common.util.SafeCloseable;
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufHolder;
-import io.netty.util.AttributeKey;
-import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.EventExecutor;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -50,7 +46,6 @@ import static zipkin2.elasticsearch.internal.JsonSerializers.JSON_FACTORY;
 import static zipkin2.elasticsearch.internal.JsonSerializers.OBJECT_MAPPER;
 
 public final class HttpCall<V> extends Call.Base<V> {
-  public static final AttributeKey<String> NAME = AttributeKey.valueOf("name");
 
   public interface BodyConverter<V> {
     /**
@@ -72,8 +67,8 @@ public final class HttpCall<V> extends Call.Base<V> {
   }
 
   /**
-   * A supplier of {@linkplain HttpHeaders headers} and {@linkplain HttpData body} of a request
-   * to Elasticsearch.
+   * A supplier of {@linkplain HttpHeaders headers} and {@linkplain HttpData body} of a request to
+   * Elasticsearch.
    */
   public interface RequestSupplier {
     /**
@@ -82,10 +77,10 @@ public final class HttpCall<V> extends Call.Base<V> {
     RequestHeaders headers();
 
     /**
-     * Writes the body of this request into the {@link RequestStream}.
-     * {@link RequestStream#tryWrite(HttpData)} can be called any number of times to publish any
-     * number of payload objects. It can be useful to split up a large payload into smaller chunks
-     * instead of buffering everything as one payload.
+     * Writes the body of this request into the {@link RequestStream}. {@link
+     * RequestStream#tryWrite(HttpData)} can be called any number of times to publish any number of
+     * payload objects. It can be useful to split up a large payload into smaller chunks instead of
+     * buffering everything as one payload.
      */
     void writeBody(RequestStream requestStream);
   }
@@ -95,18 +90,15 @@ public final class HttpCall<V> extends Call.Base<V> {
     final AggregatedHttpRequest request;
 
     AggregatedRequestSupplier(AggregatedHttpRequest request) {
-      if (request.content() instanceof ByteBufHolder) {
-        // Unfortunately it's not possible to use pooled objects in requests and support clone()
-        // after sending the request.
-        ByteBuf buf = ((ByteBufHolder) request.content()).content();
-        try {
+      try (HttpData content = request.content()) {
+        if (!content.isPooled()) {
+          this.request = request;
+        } else {
+          // Unfortunately it's not possible to use pooled objects in requests and support clone()
+          // after sending the request.
           this.request = AggregatedHttpRequest.of(
-            request.headers(), HttpData.copyOf(buf), request.trailers());
-        } finally {
-          buf.release();
+            request.headers(), HttpData.wrap(content.array()), request.trailers());
         }
-      } else {
-        this.request = request;
       }
     }
 
@@ -120,9 +112,9 @@ public final class HttpCall<V> extends Call.Base<V> {
   }
 
   public static class Factory {
-    final HttpClient httpClient;
+    final WebClient httpClient;
 
-    public Factory(HttpClient httpClient) {
+    public Factory(WebClient httpClient) {
       this.httpClient = httpClient;
     }
 
@@ -143,22 +135,21 @@ public final class HttpCall<V> extends Call.Base<V> {
   final BodyConverter<V> bodyConverter;
   final String name;
 
-  final HttpClient httpClient;
+  final WebClient httpClient;
 
   volatile CompletableFuture<AggregatedHttpResponse> responseFuture;
 
-  HttpCall(HttpClient httpClient, RequestSupplier request, BodyConverter<V> bodyConverter,
+  HttpCall(WebClient httpClient, RequestSupplier request, BodyConverter<V> bodyConverter,
     String name) {
     this.httpClient = httpClient;
     this.name = name;
     this.request = request;
-
     this.bodyConverter = bodyConverter;
   }
 
   @Override protected V doExecute() throws IOException {
     // TODO: testme
-    for (EventExecutor eventLoop : httpClient.factory().eventLoopGroup()) {
+    for (EventExecutor eventLoop : httpClient.options().factory().eventLoopGroup()) {
       if (eventLoop.inEventLoop()) {
         throw new RuntimeException("Attempting to make a blocking request from an event loop. "
           + "Either use doEnqueue() or run this in a separate thread.");
@@ -212,7 +203,8 @@ public final class HttpCall<V> extends Call.Base<V> {
 
   CompletableFuture<AggregatedHttpResponse> sendRequest() {
     final HttpResponse response;
-    try (SafeCloseable ignored = Clients.withContextCustomizer(ctx -> ctx.attr(NAME).set(name))) {
+    try (SafeCloseable ignored =
+           Clients.withContextCustomizer(ctx -> ctx.logBuilder().name(name))) {
       HttpRequestWriter httpRequest = HttpRequest.streaming(request.headers());
       response = httpClient.execute(httpRequest);
       request.writeBody(httpRequest::tryWrite);
@@ -267,21 +259,20 @@ public final class HttpCall<V> extends Call.Base<V> {
           message = root.findPath("reason").textValue();
           if (message == null) message = root.at("/Message").textValue();
         } catch (RuntimeException | IOException possiblyParseException) {
+          // EmptyCatch ignored
         }
         throw new RuntimeException(message != null ? message
           : "response for " + request.headers().path() + " failed: " + contentString.get());
       };
     }
 
-    HttpData content = response.content();
-    try (InputStream stream = content.toInputStream();
+    try (HttpData content = response.content();
+         InputStream stream = content.toInputStream();
          JsonParser parser = JSON_FACTORY.createParser(stream)) {
 
       if (status.code() == 404) throw new FileNotFoundException(request.headers().path());
 
       return bodyConverter.convert(parser, content::toStringUtf8);
-    } finally {
-      ReferenceCountUtil.safeRelease(content);
     }
   }
 }

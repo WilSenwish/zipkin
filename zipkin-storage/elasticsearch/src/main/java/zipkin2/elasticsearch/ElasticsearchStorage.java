@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -16,13 +16,14 @@ package zipkin2.elasticsearch;
 import com.fasterxml.jackson.core.JsonParser;
 import com.google.auto.value.AutoValue;
 import com.google.auto.value.extension.memoized.Memoized;
-import com.linecorp.armeria.client.HttpClient;
 import com.linecorp.armeria.client.ResponseTimeoutException;
+import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.client.endpoint.EndpointGroup;
 import com.linecorp.armeria.common.AggregatedHttpRequest;
 import com.linecorp.armeria.common.HttpMethod;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,39 +31,42 @@ import java.util.Set;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import zipkin2.Call;
 import zipkin2.CheckResult;
 import zipkin2.elasticsearch.internal.IndexNameFormatter;
 import zipkin2.elasticsearch.internal.Internal;
 import zipkin2.elasticsearch.internal.client.HttpCall;
 import zipkin2.elasticsearch.internal.client.HttpCall.BodyConverter;
 import zipkin2.internal.Nullable;
-import zipkin2.internal.Platform;
 import zipkin2.storage.AutocompleteTags;
 import zipkin2.storage.ServiceAndSpanNames;
 import zipkin2.storage.SpanConsumer;
 import zipkin2.storage.SpanStore;
 import zipkin2.storage.StorageComponent;
+import zipkin2.storage.Traces;
 
-import static zipkin2.elasticsearch.ElasticsearchAutocompleteTags.AUTOCOMPLETE;
-import static zipkin2.elasticsearch.ElasticsearchSpanStore.DEPENDENCY;
-import static zipkin2.elasticsearch.ElasticsearchSpanStore.SPAN;
+import static com.linecorp.armeria.common.HttpMethod.GET;
+import static zipkin2.elasticsearch.ElasticsearchVersion.V7_0;
+import static zipkin2.elasticsearch.ElasticsearchVersion.V7_8;
 import static zipkin2.elasticsearch.EnsureIndexTemplate.ensureIndexTemplate;
+import static zipkin2.elasticsearch.VersionSpecificTemplates.TYPE_AUTOCOMPLETE;
+import static zipkin2.elasticsearch.VersionSpecificTemplates.TYPE_DEPENDENCY;
+import static zipkin2.elasticsearch.VersionSpecificTemplates.TYPE_SPAN;
 import static zipkin2.elasticsearch.internal.JsonReaders.enterPath;
 
 @AutoValue
 public abstract class ElasticsearchStorage extends zipkin2.storage.StorageComponent {
-
   /**
-   * This defers creation of an {@link HttpClient}. This is needed because routinely, I/O occurs in
+   * This defers creation of an {@link WebClient}. This is needed because routinely, I/O occurs in
    * constructors and this can delay or cause startup to crash. For example, an underlying {@link
    * EndpointGroup} could be delayed due to DNS, implicit api calls or health checks.
    */
-  public interface LazyHttpClient extends Supplier<HttpClient>, Closeable {
+  public interface LazyHttpClient extends Supplier<WebClient>, Closeable {
     /**
      * Lazily creates an instance of the http client configured to the correct elasticsearch host or
      * cluster. The same value should always be returned.
      */
-    @Override HttpClient get();
+    @Override WebClient get();
 
     @Override default void close() {
     }
@@ -81,6 +85,7 @@ public abstract class ElasticsearchStorage extends zipkin2.storage.StorageCompon
       .dateSeparator('-')
       .indexShards(5)
       .indexReplicas(1)
+      .ensureTemplates(true)
       .namesLookback(86400000)
       .flushOnWrites(false)
       .autocompleteKeys(Collections.emptyList())
@@ -156,6 +161,18 @@ public abstract class ElasticsearchStorage extends zipkin2.storage.StorageCompon
      */
     public abstract Builder indexReplicas(int indexReplicas);
 
+    /** False disables automatic index template installation. */
+    public abstract Builder ensureTemplates(boolean ensureTemplates);
+
+    /**
+     * Only valid when the destination is Elasticsearch >= 7.8. Indicates the index template
+     * priority in case of multiple matching templates. The template with highest priority is used.
+     * Default to 0.
+     *
+     * <p>See https://www.elastic.co/guide/en/elasticsearch/reference/7.8/_index_template_and_settings_priority.html
+     */
+    public abstract Builder templatePriority(@Nullable Integer templatePriority);
+
     /** {@inheritDoc} */
     @Override public abstract Builder strictTraceId(boolean strictTraceId);
 
@@ -203,11 +220,19 @@ public abstract class ElasticsearchStorage extends zipkin2.storage.StorageCompon
 
   public abstract IndexNameFormatter indexNameFormatter();
 
+  abstract boolean ensureTemplates();
+
   public abstract int namesLookback();
+
+  @Nullable abstract Integer templatePriority();
 
   @Override public SpanStore spanStore() {
     ensureIndexTemplates();
     return new ElasticsearchSpanStore(this);
+  }
+
+  @Override public Traces traces() {
+    return (Traces) spanStore();
   }
 
   @Override public ServiceAndSpanNames serviceAndSpanNames() {
@@ -225,19 +250,23 @@ public abstract class ElasticsearchStorage extends zipkin2.storage.StorageCompon
   }
 
   /** Returns the Elasticsearch version of the connected cluster. Internal use only */
-  public float version() {
-    return ensureIndexTemplates().version();
+  @Memoized public ElasticsearchVersion version() {
+    try {
+      return ElasticsearchVersion.get(http());
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   char indexTypeDelimiter() {
-    return ensureIndexTemplates().indexTypeDelimiter();
+    return VersionSpecificTemplates.indexTypeDelimiter(version());
   }
 
   /** This is an internal blocking call, only used in tests. */
   public void clear() throws IOException {
     Set<String> toClear = new LinkedHashSet<>();
-    toClear.add(indexNameFormatter().formatType(SPAN));
-    toClear.add(indexNameFormatter().formatType(DEPENDENCY));
+    toClear.add(indexNameFormatter().formatType(TYPE_SPAN));
+    toClear.add(indexNameFormatter().formatType(TYPE_DEPENDENCY));
     for (String index : toClear) clear(index);
   }
 
@@ -259,38 +288,87 @@ public abstract class ElasticsearchStorage extends zipkin2.storage.StorageCompon
 
   /** This is blocking so that we can determine if the cluster is healthy or not */
   @Override public CheckResult check() {
-    return ensureClusterReady(indexNameFormatter().formatType(SPAN));
+    return ensureIndexTemplatesAndClusterReady(indexNameFormatter().formatType(TYPE_SPAN));
   }
 
-  CheckResult ensureClusterReady(String index) {
+  /**
+   * This allows the health check to display problems, such as access, installing the index
+   * template. It also helps reduce traffic sent to nodes still initializing (when guarded on the
+   * check result). Finally, this reads the cluster health of the index as it can go down after the
+   * one-time initialization passes.
+   */
+  CheckResult ensureIndexTemplatesAndClusterReady(String index) {
     try {
-      HttpCall.Factory http = http();
-      AggregatedHttpRequest request = AggregatedHttpRequest.of(
-        HttpMethod.GET, "/_cluster/health/" + index);
-      return http.newCall(request, READ_STATUS, "get-cluster-health").execute();
-    } catch (IOException | RuntimeException e) {
-      // Unwrap the marker exception as the health check is not relevant for the throttle component,
-      // and wrapping interferes with humans intended to read this message.
-      return CheckResult.failed(e instanceof RejectedExecutionException ? e.getCause() : e);
+      version(); // ensure the version is available (even if we already cached it)
+      ensureIndexTemplates(); // called only once, so we have to double-check health
+      AggregatedHttpRequest request = AggregatedHttpRequest.of(GET, "/_cluster/health/" + index);
+      CheckResult result = http().newCall(request, READ_STATUS, "get-cluster-health").execute();
+      if (result == null) throw new IllegalArgumentException("No content reading cluster health");
+      return result;
+    } catch (Throwable e) {
+      Call.propagateIfFatal(e);
+      // Wrapping interferes with humans intended to read this message:
+      //
+      // Unwrap the marker exception as the health check is not relevant for the throttle component.
+      // Unwrap any IOException from the first call to ensureIndexTemplates()
+      if (e instanceof RejectedExecutionException || e instanceof UncheckedIOException) {
+        e = e.getCause();
+      }
+      return CheckResult.failed(e);
     }
   }
 
-  @Memoized // since we don't want overlapping calls to apply the index templates
-  IndexTemplates ensureIndexTemplates() {
+  volatile boolean ensuredTemplates;
+
+  // synchronized since we don't want overlapping calls to apply the index templates
+  void ensureIndexTemplates() {
+    if (ensuredTemplates) return;
+    if (!ensureTemplates()) ensuredTemplates = true;
+    synchronized (this) {
+      if (ensuredTemplates) return;
+      doEnsureIndexTemplates();
+      ensuredTemplates = true;
+    }
+  }
+
+  IndexTemplates doEnsureIndexTemplates() {
     try {
-      IndexTemplates templates = new VersionSpecificTemplates(this).get();
       HttpCall.Factory http = http();
-      ensureIndexTemplate(http, buildUrl(templates, SPAN), templates.span());
-      ensureIndexTemplate(http, buildUrl(templates, DEPENDENCY), templates.dependency());
-      ensureIndexTemplate(http, buildUrl(templates, AUTOCOMPLETE), templates.autocomplete());
+      IndexTemplates templates = versionSpecificTemplates(version());
+      ensureIndexTemplate(http, buildUrl(templates, TYPE_SPAN), templates.span());
+      ensureIndexTemplate(http, buildUrl(templates, TYPE_DEPENDENCY), templates.dependency());
+      ensureIndexTemplate(http, buildUrl(templates, TYPE_AUTOCOMPLETE), templates.autocomplete());
       return templates;
     } catch (IOException e) {
-      throw Platform.get().uncheckedIOException(e);
+      throw new UncheckedIOException(e);
     }
+  }
+
+  IndexTemplates versionSpecificTemplates(ElasticsearchVersion version) {
+    return new VersionSpecificTemplates(
+      indexNameFormatter().index(),
+      indexReplicas(),
+      indexShards(),
+      searchEnabled(),
+      strictTraceId(),
+      templatePriority()
+    ).get(version);
   }
 
   String buildUrl(IndexTemplates templates, String type) {
     String indexPrefix = indexNameFormatter().index() + templates.indexTypeDelimiter();
+
+    if (version().compareTo(V7_8) >= 0 && templatePriority() != null) {
+      return "/_index_template/" + indexPrefix + type + "_template";
+    }
+    if (version().compareTo(V7_0) < 0) {
+      // because deprecation warning on 6 to prepare for 7 :
+      //
+      // [types removal] The parameter include_type_name should be explicitly specified in get
+      // template requests to prepare for 7.0. In 7.0 include_type_name will default to 'false',
+      // which means responses will omit the type name in mapping definitions."
+      return "/_template/" + indexPrefix + type + "_template?include_type_name=true";
+    }
     return "/_template/" + indexPrefix + type + "_template";
   }
 

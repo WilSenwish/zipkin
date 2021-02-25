@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -22,7 +22,7 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.Locale;
 import zipkin2.internal.Nullable;
-import zipkin2.internal.Platform;
+import zipkin2.internal.RecyclableBuffers;
 
 import static zipkin2.internal.HexCodec.HEX_DIGITS;
 
@@ -131,7 +131,7 @@ public final class Endpoint implements Serializable { // for Spark and Flink job
       return this;
     }
 
-    /** @see Endpoint#serviceName */
+    /** Sets {@link Endpoint#serviceName} */
     public Builder serviceName(@Nullable String serviceName) {
       this.serviceName = serviceName == null || serviceName.isEmpty()
         ? null : serviceName.toLowerCase(Locale.ROOT);
@@ -196,7 +196,7 @@ public final class Endpoint implements Serializable { // for Spark and Flink job
     }
 
     static String writeIpV4(byte[] ipBytes) {
-      char[] buf = Platform.shortStringBuffer();
+      char[] buf = RecyclableBuffers.shortStringBuffer();
       int pos = 0;
       pos = writeBackwards(ipBytes[0] & 0xff, pos, buf);
       buf[pos++] = '.';
@@ -276,7 +276,7 @@ public final class Endpoint implements Serializable { // for Spark and Flink job
       return this;
     }
 
-    /** @see Endpoint#portAsInt() */
+    /** Sets {@link Endpoint#portAsInt()} */
     public Builder port(int port) {
       if (port > 0xffff) throw new IllegalArgumentException("invalid port " + port);
       if (port < 0) port = 0;
@@ -368,7 +368,7 @@ public final class Endpoint implements Serializable { // for Spark and Flink job
 
   static String writeIpV6(byte[] ipv6) {
     int pos = 0;
-    char[] buf = Platform.shortStringBuffer();
+    char[] buf = RecyclableBuffers.shortStringBuffer();
 
     // Compress the longest string of zeros
     int zeroCompressionIndex = -1;

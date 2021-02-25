@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,23 +13,19 @@
  */
 package zipkin2.server.internal.elasticsearch;
 
-import com.linecorp.armeria.client.Client;
+import com.linecorp.armeria.client.ClientOptions;
 import com.linecorp.armeria.client.ClientOptionsBuilder;
-import com.linecorp.armeria.client.ClientRequestContext;
-import com.linecorp.armeria.common.HttpHeaderNames;
-import com.linecorp.armeria.common.HttpMethod;
-import com.linecorp.armeria.common.HttpRequest;
-import com.linecorp.armeria.common.HttpResponse;
-import com.linecorp.armeria.common.HttpStatus;
+import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.SessionProtocol;
-import java.net.URI;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.junit.After;
 import org.junit.Test;
 import org.springframework.beans.factory.BeanCreationException;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.UnsatisfiedDependencyException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.util.TestPropertyValues;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -38,13 +34,7 @@ import org.springframework.context.annotation.Configuration;
 import zipkin2.elasticsearch.ElasticsearchStorage;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static zipkin2.server.internal.elasticsearch.ITElasticsearchDynamicCredentials.pathOfResource;
 
 public class ZipkinElasticsearchStorageConfigurationTest {
   final AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
@@ -81,9 +71,8 @@ public class ZipkinElasticsearchStorageConfigurationTest {
     Access.registerElasticsearch(context);
     context.refresh();
 
-    assertThat(Access.convert(
-      context.getBean(ZipkinElasticsearchStorageProperties.class).getHosts()))
-      .containsExactly(URI.create("http://host1:9200"), URI.create("http://host2:9200"));
+    assertThat(context.getBean(ZipkinElasticsearchStorageProperties.class).getHosts())
+      .isEqualTo("http://host1:9200,http://host2:9200");
   }
 
   @Test public void decentToString_whenUnresolvedOrUnhealthy() {
@@ -108,20 +97,6 @@ public class ZipkinElasticsearchStorageConfigurationTest {
     context.refresh();
 
     assertThat(es().pipeline()).isEqualTo("zipkin");
-  }
-
-  /** This helps ensure old setups don't break (provided they have http port 9200 open) */
-  @Test public void coersesPort9300To9200() {
-    TestPropertyValues.of(
-      "zipkin.storage.type:elasticsearch",
-      "zipkin.storage.elasticsearch.hosts:host1:9300")
-      .applyTo(context);
-    Access.registerElasticsearch(context);
-    context.refresh();
-
-    assertThat(Access.convert(
-      context.getBean(ZipkinElasticsearchStorageProperties.class).getHosts()))
-      .containsExactly(URI.create("http://host1:9200"));
   }
 
   @Test public void httpPrefixOptional() {
@@ -150,19 +125,6 @@ public class ZipkinElasticsearchStorageConfigurationTest {
       .isEqualTo(443);
   }
 
-  @Test public void defaultsToPort9200() {
-    TestPropertyValues.of(
-      "zipkin.storage.type:elasticsearch",
-      "zipkin.storage.elasticsearch.hosts:host1")
-      .applyTo(context);
-    Access.registerElasticsearch(context);
-    context.refresh();
-
-    assertThat(Access.convert(
-      context.getBean(ZipkinElasticsearchStorageProperties.class).getHosts()))
-      .containsExactly(URI.create("http://host1:9200"));
-  }
-
   @Configuration
   static class CustomizerConfiguration {
 
@@ -176,7 +138,7 @@ public class ZipkinElasticsearchStorageConfigurationTest {
 
     Consumer<ClientOptionsBuilder> one = client -> client.maxResponseLength(12345L);
     Consumer<ClientOptionsBuilder> two =
-      client -> client.addHttpHeader("test", "bar");
+      client -> client.addHeader("test", "bar");
   }
 
   /** Ensures we can wire up network interceptors, such as for logging or authentication */
@@ -188,7 +150,7 @@ public class ZipkinElasticsearchStorageConfigurationTest {
 
     HttpClientFactory factory = context.getBean(HttpClientFactory.class);
     assertThat(factory.options.maxResponseLength()).isEqualTo(12345L);
-    assertThat(factory.options.httpHeaders().get("test")).isEqualTo("bar");
+    assertThat(factory.options.headers().get("test")).isEqualTo("bar");
   }
 
   @Test public void timeout_defaultsTo10Seconds() {
@@ -316,8 +278,7 @@ public class ZipkinElasticsearchStorageConfigurationTest {
   }
 
   @Test
-  public void doesntProvideBasicAuthInterceptor_whenBasicAuthUserNameandPasswordNotConfigured()
-    throws Exception {
+  public void doesntProvideBasicAuthInterceptor_whenBasicAuthUserNameandPasswordNotConfigured() {
     TestPropertyValues.of(
       "zipkin.storage.type:elasticsearch",
       "zipkin.storage.elasticsearch.hosts:127.0.0.1:1234")
@@ -326,23 +287,13 @@ public class ZipkinElasticsearchStorageConfigurationTest {
     context.refresh();
 
     HttpClientFactory factory = context.getBean(HttpClientFactory.class);
-
-    Client<HttpRequest, HttpResponse> delegate = mock(Client.class);
-    Client<HttpRequest, HttpResponse> decorated =
-      factory.options.decoration().decorate(HttpRequest.class, HttpResponse.class, delegate);
-
-    // TODO(anuraaga): This can be cleaner after https://github.com/line/armeria/issues/1883
-    HttpRequest req = HttpRequest.of(HttpMethod.GET, "/");
-    ClientRequestContext ctx = spy(ClientRequestContext.of(req));
-    when(delegate.execute(any(), any())).thenReturn(HttpResponse.of(HttpStatus.OK));
-
-    decorated.execute(ctx, req);
-
-    verify(ctx, never()).addAdditionalRequestHeader(eq(HttpHeaderNames.AUTHORIZATION), any());
+    WebClient client = WebClient.builder("http://127.0.0.1:1234")
+      .option(ClientOptions.DECORATION, factory.options.decoration())
+      .build();
+    assertThat(client.as(BasicAuthInterceptor.class)).isNull();
   }
 
-  @Test public void providesBasicAuthInterceptor_whenBasicAuthUserNameAndPasswordConfigured()
-    throws Exception {
+  @Test public void providesBasicAuthInterceptor_whenBasicAuthUserNameAndPasswordConfigured() {
     TestPropertyValues.of(
       "zipkin.storage.type:elasticsearch",
       "zipkin.storage.elasticsearch.hosts:127.0.0.1:1234",
@@ -354,18 +305,59 @@ public class ZipkinElasticsearchStorageConfigurationTest {
 
     HttpClientFactory factory = context.getBean(HttpClientFactory.class);
 
-    Client<HttpRequest, HttpResponse> delegate = mock(Client.class);
-    Client<HttpRequest, HttpResponse> decorated = factory.options.decoration()
-      .decorate(HttpRequest.class, HttpResponse.class, delegate);
+    WebClient client = WebClient.builder("http://127.0.0.1:1234")
+      .option(ClientOptions.DECORATION, factory.options.decoration())
+      .build();
+    assertThat(client.as(BasicAuthInterceptor.class)).isNotNull();
+  }
 
-    // TODO(anuraaga): This can be cleaner after https://github.com/line/armeria/issues/1883
-    HttpRequest req = HttpRequest.of(HttpMethod.GET, "/");
-    ClientRequestContext ctx = spy(ClientRequestContext.of(req));
-    when(delegate.execute(any(), any())).thenReturn(HttpResponse.of(HttpStatus.OK));
+  @Test
+  public void providesBasicAuthInterceptor_whenDynamicCredentialsConfigured() {
+    String credentialsFile = pathOfResource("es-credentials");
+    TestPropertyValues.of(
+      "zipkin.storage.type:elasticsearch",
+      "zipkin.storage.elasticsearch.hosts:127.0.0.1:1234",
+      "zipkin.storage.elasticsearch.credentials-file:" + credentialsFile,
+      "zipkin.storage.elasticsearch.credentials-refresh-interval:2")
+      .applyTo(context);
+    Access.registerElasticsearch(context);
+    context.refresh();
 
-    decorated.execute(ctx, req);
+    HttpClientFactory factory = context.getBean(HttpClientFactory.class);
 
-    verify(ctx).addAdditionalRequestHeader(eq(HttpHeaderNames.AUTHORIZATION), any());
+    WebClient client = WebClient.builder("http://127.0.0.1:1234")
+      .option(ClientOptions.DECORATION, factory.options.decoration())
+      .build();
+    assertThat(client.as(BasicAuthInterceptor.class)).isNotNull();
+    BasicCredentials basicCredentials =
+      Objects.requireNonNull(client.as(BasicAuthInterceptor.class)).basicCredentials;
+    String credentials = basicCredentials.getCredentials();
+    assertThat(credentials).isEqualTo("Basic Zm9vOmJhcg==");
+  }
+
+  @Test(expected = BeanCreationException.class)
+  public void providesBasicAuthInterceptor_whenInvalidDynamicCredentialsConfigured() {
+    String credentialsFile = pathOfResource("es-credentials-invalid");
+    TestPropertyValues.of(
+      "zipkin.storage.type:elasticsearch",
+      "zipkin.storage.elasticsearch.hosts:127.0.0.1:1234",
+      "zipkin.storage.elasticsearch.credentials-file:" + credentialsFile,
+      "zipkin.storage.elasticsearch.credentials-refresh-interval:2")
+      .applyTo(context);
+    Access.registerElasticsearch(context);
+    context.refresh();
+  }
+
+  @Test(expected = BeanCreationException.class)
+  public void providesBasicAuthInterceptor_whenDynamicCredentialsConfiguredButFileAbsent() {
+    TestPropertyValues.of(
+      "zipkin.storage.type:elasticsearch",
+      "zipkin.storage.elasticsearch.hosts:127.0.0.1:1234",
+      "zipkin.storage.elasticsearch.credentials-file:no-this-file",
+      "zipkin.storage.elasticsearch.credentials-refresh-interval:2")
+      .applyTo(context);
+    Access.registerElasticsearch(context);
+    context.refresh();
   }
 
   @Test public void searchEnabled_false() {
@@ -414,6 +406,42 @@ public class ZipkinElasticsearchStorageConfigurationTest {
 
     assertThat(es()).extracting("autocompleteCardinality")
       .isEqualTo(5000);
+  }
+
+  @Test public void templatePriority_valid() {
+    TestPropertyValues.of(
+      "zipkin.storage.type:elasticsearch",
+      "zipkin.storage.elasticsearch.template-priority:0")
+      .applyTo(context);
+    Access.registerElasticsearch(context);
+    context.refresh();
+
+    assertThat(es()).extracting("templatePriority")
+      .isEqualTo(0);
+  }
+
+  @Test public void templatePriority_null() {
+    TestPropertyValues.of(
+      "zipkin.storage.type:elasticsearch",
+      "zipkin.storage.elasticsearch.template-priority:")
+      .applyTo(context);
+    Access.registerElasticsearch(context);
+    context.refresh();
+
+    assertThat(es()).extracting("templatePriority")
+      .isNull();
+  }
+
+  @Test(expected = UnsatisfiedDependencyException.class)
+  public void templatePriority_Invalid() {
+    TestPropertyValues.of(
+      "zipkin.storage.type:elasticsearch",
+      "zipkin.storage.elasticsearch.template-priority:string")
+      .applyTo(context);
+    Access.registerElasticsearch(context);
+    context.refresh();
+
+    es();
   }
 
   ElasticsearchStorage es() {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -22,9 +22,17 @@ import com.linecorp.armeria.client.ClientOptionsBuilder;
 import com.linecorp.armeria.client.brave.BraveClient;
 import com.linecorp.armeria.client.endpoint.EndpointGroup;
 import com.linecorp.armeria.common.SessionProtocol;
+import com.linecorp.armeria.common.logging.RequestLog;
+import com.linecorp.armeria.common.logging.RequestLogProperty;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.util.NamedThreadFactory;
+import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import javax.net.ssl.KeyManagerFactory;
@@ -41,18 +49,23 @@ import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.type.AnnotatedTypeMetadata;
 import zipkin2.elasticsearch.ElasticsearchStorage;
-import zipkin2.elasticsearch.internal.client.HttpCall;
 import zipkin2.server.internal.ConditionalOnSelfTracing;
 import zipkin2.storage.StorageComponent;
 
 import static zipkin2.server.internal.elasticsearch.ZipkinElasticsearchStorageProperties.Ssl;
 
-@Configuration
+@Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(ZipkinElasticsearchStorageProperties.class)
 @ConditionalOnProperty(name = "zipkin.storage.type", havingValue = "elasticsearch")
 @ConditionalOnMissingBean(StorageComponent.class)
 public class ZipkinElasticsearchStorageConfiguration {
   static final String QUALIFIER = "zipkinElasticsearch";
+  static final String USERNAME = "zipkin.storage.elasticsearch.username";
+  static final String PASSWORD = "zipkin.storage.elasticsearch.password";
+  static final String CREDENTIALS_FILE =
+    "zipkin.storage.elasticsearch.credentials-file";
+  static final String CREDENTIALS_REFRESH_INTERVAL =
+    "zipkin.storage.elasticsearch.credentials-refresh-interval";
 
   // Exposed as a bean so that zipkin-aws can override this as sourced from the AWS endpoints api
   @Bean @Qualifier(QUALIFIER) @ConditionalOnMissingBean
@@ -74,14 +87,15 @@ public class ZipkinElasticsearchStorageConfiguration {
   @Bean @Qualifier(QUALIFIER) @ConditionalOnMissingBean ClientFactory esClientFactory(
     ZipkinElasticsearchStorageProperties es,
     MeterRegistry meterRegistry) throws Exception {
-    ClientFactoryBuilder builder = new ClientFactoryBuilder();
+    ClientFactoryBuilder builder = ClientFactory.builder();
 
-    // Allow use of a custom KeyStore or TrustStore when connecting to Elasticsearch
     Ssl ssl = es.getSsl();
+    if (ssl.isNoVerify()) builder.tlsNoVerify();
+    // Allow use of a custom KeyStore or TrustStore when connecting to Elasticsearch
     if (ssl.getKeyStore() != null || ssl.getTrustStore() != null) configureSsl(builder, ssl);
 
     // Elasticsearch 7 never returns a response when receiving an HTTP/2 preface instead of the more
-    // valid behavior of returning a bad request response, so we can't use the preface.\
+    // valid behavior of returning a bad request response, so we can't use the preface.
     // TODO: find or raise a bug with Elastic
     return builder.useHttp2Preface(false)
       .connectTimeoutMillis(es.getTimeout())
@@ -123,17 +137,42 @@ public class ZipkinElasticsearchStorageConfiguration {
   }
 
   @Bean @Qualifier(QUALIFIER) @Conditional(BasicAuthRequired.class)
-  Consumer<ClientOptionsBuilder> esBasicAuth(ZipkinElasticsearchStorageProperties es) {
+  Consumer<ClientOptionsBuilder> esBasicAuth(
+    @Qualifier(QUALIFIER) BasicCredentials basicCredentials) {
     return new Consumer<ClientOptionsBuilder>() {
       @Override public void accept(ClientOptionsBuilder client) {
         client.decorator(
-          delegate -> new BasicAuthInterceptor(delegate, es.getUsername(), es.getPassword()));
+          delegate -> new BasicAuthInterceptor(delegate, basicCredentials));
       }
 
       @Override public String toString() {
         return "BasicAuthCustomizer{basicCredentials=<redacted>}";
       }
     };
+  }
+
+  @Bean @Qualifier(QUALIFIER) @Conditional(BasicAuthRequired.class)
+  BasicCredentials basicCredentials(ZipkinElasticsearchStorageProperties es) {
+    if (isEmpty(es.getUsername()) || isEmpty(es.getPassword())) {
+      return new BasicCredentials();
+    }
+    return new BasicCredentials(es.getUsername(), es.getPassword());
+  }
+
+  @Bean(destroyMethod = "shutdown") @Qualifier(QUALIFIER) @Conditional(DynamicRefreshRequired.class)
+  ScheduledExecutorService dynamicCredentialsScheduledExecutorService(
+    @Value("${" + CREDENTIALS_FILE + "}") String credentialsFile,
+    @Value("${" + CREDENTIALS_REFRESH_INTERVAL + "}") Integer credentialsRefreshInterval,
+    @Qualifier(QUALIFIER) BasicCredentials basicCredentials) throws IOException {
+    ScheduledExecutorService ses = Executors.newSingleThreadScheduledExecutor(
+      new NamedThreadFactory("zipkin-load-es-credentials"));
+    DynamicCredentialsFileLoader credentialsFileLoader =
+      new DynamicCredentialsFileLoader(basicCredentials, credentialsFile);
+    credentialsFileLoader.updateCredentialsFromProperties();
+    ScheduledFuture<?> future = ses.scheduleAtFixedRate(credentialsFileLoader,
+        0, credentialsRefreshInterval, TimeUnit.SECONDS);
+    if (future.isDone()) throw new RuntimeException("credential refresh thread didn't start");
+    return ses;
   }
 
   @Bean @Qualifier(QUALIFIER) @ConditionalOnSelfTracing
@@ -150,9 +189,14 @@ public class ZipkinElasticsearchStorageConfiguration {
 
     return client -> {
       client.decorator((delegate, ctx, req) -> {
-        String name = ctx.attr(HttpCall.NAME).get();
-        if (name != null) { // override the span name if set
-          spanCustomizer.name(name);
+        // We only need the name if it's available and can unsafely access the partially filled log.
+        RequestLog log = ctx.log().partial();
+        if (log.isAvailable(RequestLogProperty.NAME)) {
+          String name = log.name();
+          if (name != null) {
+            // override the span name if set
+            spanCustomizer.name(name);
+          }
         }
         return delegate.execute(ctx, req);
       });
@@ -164,18 +208,25 @@ public class ZipkinElasticsearchStorageConfiguration {
   static final class BasicAuthRequired implements Condition {
     @Override public boolean matches(ConditionContext condition, AnnotatedTypeMetadata ignored) {
       String userName =
-        condition.getEnvironment().getProperty("zipkin.storage.elasticsearch.username");
+        condition.getEnvironment().getProperty(USERNAME);
       String password =
-        condition.getEnvironment().getProperty("zipkin.storage.elasticsearch.password");
-      return !isEmpty(userName) && !isEmpty(password);
+        condition.getEnvironment().getProperty(PASSWORD);
+      String credentialsFile =
+        condition.getEnvironment().getProperty(CREDENTIALS_FILE);
+      return (!isEmpty(userName) && !isEmpty(password)) || !isEmpty(credentialsFile);
+    }
+  }
+
+  static final class DynamicRefreshRequired implements Condition {
+    @Override public boolean matches(ConditionContext condition, AnnotatedTypeMetadata ignored) {
+      return !isEmpty(condition.getEnvironment().getProperty(CREDENTIALS_FILE));
     }
   }
 
   static ClientFactoryBuilder configureSsl(ClientFactoryBuilder builder, Ssl ssl) throws Exception {
     final KeyManagerFactory keyManagerFactory = SslUtil.getKeyManagerFactory(ssl);
     final TrustManagerFactory trustManagerFactory = SslUtil.getTrustManagerFactory(ssl);
-
-    return builder.sslContextCustomizer(sslContextBuilder -> {
+    return builder.tlsCustomizer(sslContextBuilder -> {
       sslContextBuilder.keyManager(keyManagerFactory);
       sslContextBuilder.trustManager(trustManagerFactory);
     });

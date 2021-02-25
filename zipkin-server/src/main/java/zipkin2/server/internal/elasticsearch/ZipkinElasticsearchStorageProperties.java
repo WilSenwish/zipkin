@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -33,8 +33,11 @@ import zipkin2.elasticsearch.ElasticsearchStorage.LazyHttpClient;
  *   date-separator: -
  *   index-shards: 5
  *   index-replicas: 1
+ *   ensure-templates: true
  *   username: username
  *   password: password
+ *   credentials-file: credentialsFile
+ *   credentials-refresh-interval: 1
  *   http-logging: HEADERS
  *   ssl:
  *     key-store: keystore.p12
@@ -45,7 +48,9 @@ import zipkin2.elasticsearch.ElasticsearchStorage.LazyHttpClient;
  *     trust-store-type: PKCS12
  *   health-check:
  *     enabled: true
+ *     http-logging: HEADERS
  *     interval: 3s
+ *   template-priority: 0
  * }</pre>
  */
 @ConfigurationProperties("zipkin.storage.elasticsearch")
@@ -63,11 +68,15 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
 
   public static class Ssl {
     private String keyStore = emptyToNull(System.getProperty("javax.net.ssl.keyStore"));
-    private String keyStorePassword = emptyToNull(System.getProperty("javax.net.ssl.keyStorePassword"));
+    private String keyStorePassword =
+      emptyToNull(System.getProperty("javax.net.ssl.keyStorePassword"));
     private String keyStoreType = emptyToNull(System.getProperty("javax.net.ssl.keyStoreType"));
     private String trustStore = emptyToNull(System.getProperty("javax.net.ssl.trustStore"));
-    private String trustStorePassword = emptyToNull(System.getProperty("javax.net.ssl.trustStorePassword"));
+    private String trustStorePassword =
+      emptyToNull(System.getProperty("javax.net.ssl.trustStorePassword"));
     private String trustStoreType = emptyToNull(System.getProperty("javax.net.ssl.trustStoreType"));
+    /** Disables the verification of server's key certificate chain. */
+    boolean noVerify = false;
 
     public String getKeyStore() {
       return keyStore;
@@ -116,6 +125,14 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
     public void setTrustStoreType(String trustStoreType) {
       this.trustStoreType = trustStoreType;
     }
+
+    public boolean isNoVerify() {
+      return noVerify;
+    }
+
+    public void setNoVerify(boolean noVerify) {
+      this.noVerify = noVerify;
+    }
   }
 
   /**
@@ -124,6 +141,8 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
   public static class HealthCheck {
     /** Indicates health checking is enabled. */
     private boolean enabled = true;
+    /** When set, controls the volume of HTTP logging of the Elasticsearch API. */
+    private HttpLogging httpLogging = HttpLogging.NONE;
 
     /** The time to wait between sending health check requests. */
     @DurationUnit(ChronoUnit.MILLIS)
@@ -135,6 +154,14 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
 
     public void setEnabled(boolean enabled) {
       this.enabled = enabled;
+    }
+
+    public HttpLogging getHttpLogging() {
+      return httpLogging;
+    }
+
+    public void setHttpLogging(HttpLogging httpLogging) {
+      this.httpLogging = httpLogging;
     }
 
     public Duration getInterval() {
@@ -162,13 +189,22 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
   private Integer indexShards;
   /** Number of replicas (redundancy factor) per index. */
   private Integer indexReplicas;
+  /** False disables automatic index template creation. */
+  private Boolean ensureTemplates;
   /** username used for basic auth. Needed when Shield or X-Pack security is enabled */
   private String username;
   /** password used for basic auth. Needed when Shield or X-Pack security is enabled */
   private String password;
-  /** When set, controls the volume of HTTP logging of the Elasticsearch Api. */
+  /**
+   * credentialsFile is an absolute path refers to a properties-file used to store username and
+   * password
+   */
+  private String credentialsFile;
+  /** Credentials refresh interval (in seconds) */
+  private Integer credentialsRefreshInterval = 1;
+  /** When set, controls the volume of HTTP logging of the Elasticsearch API. */
   private HttpLogging httpLogging = HttpLogging.NONE;
-  /** Connect, read and write socket timeouts (in milliseconds) for Elasticsearch Api requests. */
+  /** Connect, read and write socket timeouts (in milliseconds) for Elasticsearch API requests. */
   private Integer timeout = 10_000;
   /** Overrides ssl configuration relating to the Elasticsearch client connection. */
   private Ssl ssl = new Ssl();
@@ -176,6 +212,8 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
   private Integer maxRequests; // unused
 
   private HealthCheck healthCheck = new HealthCheck();
+
+  private Integer templatePriority;
 
   public String getPipeline() {
     return pipeline;
@@ -217,6 +255,14 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
     this.indexShards = indexShards;
   }
 
+  public Boolean isEnsureTemplates() {
+    return ensureTemplates;
+  }
+
+  public void setEnsureTemplates(Boolean ensureTemplates) {
+    this.ensureTemplates = ensureTemplates;
+  }
+
   public String getDateSeparator() {
     return dateSeparator;
   }
@@ -253,6 +299,23 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
     this.password = emptyToNull(password);
   }
 
+  public String getCredentialsFile() {
+    return credentialsFile;
+  }
+
+  public void setCredentialsFile(final String credentialsFile) {
+    this.credentialsFile = credentialsFile;
+  }
+
+  public Integer getCredentialsRefreshInterval() {
+    return credentialsRefreshInterval;
+  }
+
+  public void setCredentialsRefreshInterval(
+    Integer credentialsRefreshInterval) {
+    this.credentialsRefreshInterval = credentialsRefreshInterval;
+  }
+
   public HttpLogging getHttpLogging() {
     return httpLogging;
   }
@@ -286,6 +349,10 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
     this.ssl = ssl;
   }
 
+  public Integer getTemplatePriority() { return templatePriority; }
+
+  public void setTemplatePriority(Integer templatePriority) { this.templatePriority = templatePriority; }
+
   public ElasticsearchStorage.Builder toBuilder(LazyHttpClient httpClient) {
     ElasticsearchStorage.Builder builder = ElasticsearchStorage.newBuilder(httpClient);
     if (index != null) builder.index(index);
@@ -295,10 +362,12 @@ class ZipkinElasticsearchStorageProperties implements Serializable { // for Spar
     if (pipeline != null) builder.pipeline(pipeline);
     if (indexShards != null) builder.indexShards(indexShards);
     if (indexReplicas != null) builder.indexReplicas(indexReplicas);
+    if (ensureTemplates != null) builder.ensureTemplates(ensureTemplates);
 
     if (maxRequests != null) {
       log.warning("ES_MAX_REQUESTS is no longer honored. Use STORAGE_THROTTLE_ENABLED instead");
     }
+    if (templatePriority != null) builder.templatePriority(templatePriority);
     return builder;
   }
 

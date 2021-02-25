@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -18,6 +18,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import zipkin2.Call;
 import zipkin2.Span;
 import zipkin2.elasticsearch.internal.BulkCallBuilder;
@@ -26,12 +27,11 @@ import zipkin2.elasticsearch.internal.IndexNameFormatter;
 import zipkin2.internal.DelayLimiter;
 import zipkin2.storage.SpanConsumer;
 
-import static zipkin2.elasticsearch.ElasticsearchAutocompleteTags.AUTOCOMPLETE;
-import static zipkin2.elasticsearch.ElasticsearchSpanStore.SPAN;
-import static zipkin2.internal.Platform.SHORT_STRING_LENGTH;
+import static zipkin2.elasticsearch.VersionSpecificTemplates.TYPE_AUTOCOMPLETE;
+import static zipkin2.elasticsearch.VersionSpecificTemplates.TYPE_SPAN;
+import static zipkin2.internal.RecyclableBuffers.SHORT_STRING_LENGTH;
 
 class ElasticsearchSpanConsumer implements SpanConsumer { // not final for testing
-
   final ElasticsearchStorage es;
   final Set<String> autocompleteKeys;
   final IndexNameFormatter indexNameFormatter;
@@ -46,13 +46,13 @@ class ElasticsearchSpanConsumer implements SpanConsumer { // not final for testi
     this.indexTypeDelimiter = es.indexTypeDelimiter();
     this.searchEnabled = es.searchEnabled();
     this.delayLimiter = DelayLimiter.newBuilder()
-      .ttl(es.autocompleteTtl())
+      .ttl(es.autocompleteTtl(), TimeUnit.MILLISECONDS)
       .cardinality(es.autocompleteCardinality()).build();
   }
 
   String formatTypeAndTimestampForInsert(String type, long timestampMillis) {
-    return indexNameFormatter.formatTypeAndTimestampForInsert(type, indexTypeDelimiter,
-      timestampMillis);
+    return indexNameFormatter
+      .formatTypeAndTimestampForInsert(type, indexTypeDelimiter, timestampMillis);
   }
 
   @Override public Call<Void> accept(List<Span> spans) {
@@ -96,12 +96,12 @@ class ElasticsearchSpanConsumer implements SpanConsumer { // not final for testi
     }
 
     void add(long indexTimestamp, Span span) {
-      String index = consumer.formatTypeAndTimestampForInsert(SPAN, indexTimestamp);
-      bulkCallBuilder.index(index, SPAN, span, spanWriter);
+      String index = consumer.formatTypeAndTimestampForInsert(TYPE_SPAN, indexTimestamp);
+      bulkCallBuilder.index(index, TYPE_SPAN, span, spanWriter);
     }
 
     void addAutocompleteValues(long indexTimestamp, Span span) {
-      String idx = consumer.formatTypeAndTimestampForInsert(AUTOCOMPLETE, indexTimestamp);
+      String idx = consumer.formatTypeAndTimestampForInsert(TYPE_AUTOCOMPLETE, indexTimestamp);
       for (Map.Entry<String, String> tag : span.tags().entrySet()) {
         int length = tag.getKey().length() + tag.getValue().length() + 1;
         if (length > SHORT_STRING_LENGTH) continue;
@@ -114,7 +114,7 @@ class ElasticsearchSpanConsumer implements SpanConsumer { // not final for testi
         if (!consumer.delayLimiter.shouldInvoke(context)) continue;
         pendingAutocompleteContexts.add(context);
 
-        bulkCallBuilder.index(idx, AUTOCOMPLETE, tag, BulkIndexWriter.AUTOCOMPLETE);
+        bulkCallBuilder.index(idx, TYPE_AUTOCOMPLETE, tag, BulkIndexWriter.AUTOCOMPLETE);
       }
     }
 

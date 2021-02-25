@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,33 +13,39 @@
  */
 package zipkin2.server.internal.prometheus;
 
+import com.linecorp.armeria.common.HttpRequest;
 import com.linecorp.armeria.common.HttpResponse;
 import com.linecorp.armeria.common.HttpStatus;
-import com.linecorp.armeria.common.Request;
 import com.linecorp.armeria.common.RequestContext;
-import com.linecorp.armeria.common.Response;
 import com.linecorp.armeria.common.logging.RequestLog;
-import com.linecorp.armeria.common.logging.RequestLogAvailability;
+import com.linecorp.armeria.server.HttpService;
 import com.linecorp.armeria.server.Route;
-import com.linecorp.armeria.server.Service;
 import com.linecorp.armeria.server.ServiceRequestContext;
-import com.linecorp.armeria.server.SimpleDecoratingService;
+import com.linecorp.armeria.server.SimpleDecoratingHttpService;
 import com.linecorp.armeria.spring.ArmeriaServerConfigurator;
 import io.micrometer.core.instrument.Clock;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.binder.jvm.ClassLoaderMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmThreadMetrics;
+import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
+import io.micrometer.prometheus.PrometheusConfig;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
 import io.netty.util.AttributeKey;
+import io.prometheus.client.CollectorRegistry;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.util.StringUtils;
 
-@Configuration
+@Configuration(proxyBeanMethods=false)
 public class ZipkinPrometheusMetricsConfiguration {
   // from io.micrometer.spring.web.servlet.WebMvcTags
   private static final Tag URI_NOT_FOUND = Tag.of("uri", "NOT_FOUND");
@@ -48,22 +54,45 @@ public class ZipkinPrometheusMetricsConfiguration {
   // single-page app requests are forwarded to index: ZipkinUiConfiguration.forwardUiEndpoints
   private static final Tag URI_CROSSROADS = Tag.of("uri", "/zipkin/index.html");
 
-  final PrometheusMeterRegistry registry;
-  // https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready-metrics-spring-mvc
   final String metricName;
 
+  // https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready-metrics-spring-mvc
   ZipkinPrometheusMetricsConfiguration(
-    PrometheusMeterRegistry registry,
     @Value("${management.metrics.web.server.requests-metric-name:http.server.requests}")
       String metricName
   ) {
-    this.registry = registry;
     this.metricName = metricName;
   }
 
-  @Bean ArmeriaServerConfigurator httpRequestDurationConfigurator() {
-    return serverBuilder -> serverBuilder.decorator(
-      s -> new MetricCollectingService<>(s, registry, metricName));
+  @Bean @ConditionalOnMissingBean public Clock clock() {
+    return Clock.SYSTEM;
+  }
+
+  @Bean @ConditionalOnMissingBean public PrometheusConfig config() {
+    return PrometheusConfig.DEFAULT;
+  }
+
+  @Bean @ConditionalOnMissingBean public CollectorRegistry registry() {
+    return new CollectorRegistry(true);
+  }
+
+  @Bean @ConditionalOnMissingBean public PrometheusMeterRegistry prometheusMeterRegistry(
+    PrometheusConfig config, CollectorRegistry registry, Clock clock) {
+    PrometheusMeterRegistry meterRegistry = new PrometheusMeterRegistry(config, registry, clock);
+    new JvmMemoryMetrics().bindTo(meterRegistry);
+    new JvmGcMetrics().bindTo(meterRegistry);
+    new JvmThreadMetrics().bindTo(meterRegistry);
+    new ClassLoaderMetrics().bindTo(meterRegistry);
+    new ProcessorMetrics().bindTo(meterRegistry);
+    return meterRegistry;
+  }
+
+  // https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#production-ready-metrics-spring-mvc
+  @Bean ArmeriaServerConfigurator httpRequestDurationConfigurator(MeterRegistry registry) {
+    return serverBuilder -> serverBuilder.routeDecorator()
+      .pathPrefix("/zipkin/api")
+      .pathPrefix("/api")
+      .build(s -> new MetricCollectingService(s, registry, metricName));
   }
 
   // We need to make sure not-found requests are still handled by a service to be decorated for
@@ -77,21 +106,20 @@ public class ZipkinPrometheusMetricsConfiguration {
       (ctx, req) -> HttpResponse.of(HttpStatus.NOT_FOUND));
   }
 
-  static final class MetricCollectingService<I extends Request, O extends Response>
-    extends SimpleDecoratingService<I, O> {
+  static final class MetricCollectingService extends SimpleDecoratingHttpService {
     final MeterRegistry registry;
     final String metricName;
 
-    MetricCollectingService(Service<I, O> delegate, MeterRegistry registry, String metricName) {
+    MetricCollectingService(HttpService delegate, MeterRegistry registry, String metricName) {
       super(delegate);
       this.registry = registry;
       this.metricName = metricName;
     }
 
     @Override
-    public O serve(ServiceRequestContext ctx, I req) throws Exception {
+    public HttpResponse serve(ServiceRequestContext ctx, HttpRequest req) throws Exception {
       setup(ctx, registry, metricName);
-      return delegate().serve(ctx, req);
+      return unwrap().serve(ctx, req);
     }
   }
 
@@ -99,26 +127,15 @@ public class ZipkinPrometheusMetricsConfiguration {
   private static final AttributeKey<Boolean> PROMETHEUS_METRICS_SET =
     AttributeKey.valueOf(Boolean.class, "PROMETHEUS_METRICS_SET");
 
+  @SuppressWarnings("FutureReturnValueIgnored") // no known action to take following .thenAccept
   public static void setup(RequestContext ctx, MeterRegistry registry, String metricName) {
     if (ctx.hasAttr(PROMETHEUS_METRICS_SET)) {
       return;
     }
-    ctx.attr(PROMETHEUS_METRICS_SET).set(true);
-
-    ctx.log().addListener(log -> onRequest(log, registry, metricName),
-      RequestLogAvailability.REQUEST_HEADERS,
-      RequestLogAvailability.REQUEST_CONTENT);
+    ctx.setAttr(PROMETHEUS_METRICS_SET, true);
+    ctx.log().whenComplete().thenAccept(log -> getTimeBuilder(log, metricName).register(registry)
+      .record(log.totalDurationNanos(), TimeUnit.NANOSECONDS));
   }
-
-  private static void onRequest(RequestLog log, MeterRegistry registry, String metricName) {
-    Clock clock = registry.config().clock();
-    long startTime = clock.monotonicTime();
-    log.addListener(requestLog -> {
-      getTimeBuilder(requestLog, metricName).register(registry)
-        .record(clock.monotonicTime() - startTime, TimeUnit.NANOSECONDS);
-    }, RequestLogAvailability.COMPLETE);
-  }
-
 
   private static Timer.Builder getTimeBuilder(RequestLog requestLog, String metricName) {
     return Timer.builder(metricName)
@@ -127,17 +144,16 @@ public class ZipkinPrometheusMetricsConfiguration {
       .publishPercentileHistogram();
   }
 
-
   private static Iterable<Tag> getTags(RequestLog requestLog) {
-    return Arrays.asList(Tag.of("method", requestLog.method().toString())
+    return Arrays.asList(Tag.of("method", requestLog.requestHeaders().method().toString())
       , uri(requestLog)
-      , Tag.of("status", Integer.toString(requestLog.statusCode()))
+      , Tag.of("status", Integer.toString(requestLog.responseHeaders().status().code()))
     );
   }
 
   /** Ensure metrics cardinality doesn't blow up on variables */
   private static Tag uri(RequestLog requestLog) {
-    int status = requestLog.statusCode();
+    int status = requestLog.responseHeaders().status().code();
     if (status > 299 && status < 400) return URI_REDIRECTION;
     if (status == 404) return URI_NOT_FOUND;
 
@@ -162,7 +178,7 @@ public class ZipkinPrometheusMetricsConfiguration {
 
   // from io.micrometer.spring.web.servlet.WebMvcTags
   static String getPathInfo(RequestLog requestLog) {
-    String uri = requestLog.path();
+    String uri = requestLog.context().path();
     if (!StringUtils.hasText(uri)) return "/";
     return uri.replaceAll("//+", "/")
       .replaceAll("/$", "");

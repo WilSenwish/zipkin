@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -14,11 +14,8 @@
 import { createStore, applyMiddleware } from 'redux';
 import thunk from 'redux-thunk';
 
-import reducer from '../reducers';
+import createReducer from '../reducers';
 
-export default function configureStore() {
-  return createStore(
-    reducer,
-    applyMiddleware(thunk),
-  );
+export default function configureStore(config) {
+  return createStore(createReducer(config), applyMiddleware(thunk));
 }

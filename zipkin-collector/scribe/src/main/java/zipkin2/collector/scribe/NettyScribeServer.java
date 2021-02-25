@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -20,6 +20,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import java.net.InetSocketAddress;
 
 import static zipkin2.Call.propagateIfFatal;
@@ -46,7 +47,9 @@ final class NettyScribeServer {
         .channel(EventLoopGroups.serverChannelType(bossGroup))
         .childHandler(new ChannelInitializer<SocketChannel>() {
           @Override protected void initChannel(SocketChannel ch) {
-            ch.pipeline().addLast(new ScribeInboundHandler(scribe));
+            ch.pipeline()
+              .addLast(new LengthFieldBasedFrameDecoder(Integer.MAX_VALUE, 0, 4, 0, 4))
+              .addLast(new ScribeInboundHandler(scribe));
           }
         })
         .bind(port)
@@ -58,9 +61,11 @@ final class NettyScribeServer {
     }
   }
 
+  @SuppressWarnings("FutureReturnValueIgnored")
   void close() {
     if (channel == null) return;
     // TODO: chain these futures, and probably block a bit
+    // https://line-armeria.slack.com/archives/C1NGPBUH2/p1591167918430500
     channel.close();
     bossGroup.shutdownGracefully();
   }

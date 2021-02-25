@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -14,41 +14,64 @@
 package zipkin2.server.internal.elasticsearch;
 
 import com.linecorp.armeria.client.Endpoint;
-import com.linecorp.armeria.client.endpoint.DynamicEndpointGroup;
-import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
+import static com.linecorp.armeria.common.SessionProtocol.HTTP;
+import static com.linecorp.armeria.common.SessionProtocol.HTTPS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class InitialEndpointSupplierTest {
-  static final Endpoint FOO = Endpoint.of("foo");
-  static final Endpoint BAR = Endpoint.of("bar");
-  static final Endpoint CAT = Endpoint.of("cat");
-  static final Endpoint DOG = Endpoint.of("dog");
 
-  // Simple class to give public access to methods.
-  static class PublicDynamicEndpointGroup extends DynamicEndpointGroup {
-    void doSetEndpoints(Endpoint... endpoints) {
-      setEndpoints(Arrays.asList(endpoints));
-    }
+  @Test void defaultIsLocalhost9200RegardlessOfSessionProtocol() {
+    assertThat(new InitialEndpointSupplier(HTTP, null).get())
+      .isEqualTo(Endpoint.of("localhost", 9200))
+      .isEqualTo(new InitialEndpointSupplier(HTTPS, null).get());
   }
 
-  @Test void compositeEndpoints() {
-    PublicDynamicEndpointGroup group1 = new PublicDynamicEndpointGroup();
-    PublicDynamicEndpointGroup group2 = new PublicDynamicEndpointGroup();
-
-    InitialEndpointSupplier.CompositeEndpointGroup composite =
-      new InitialEndpointSupplier.CompositeEndpointGroup(Arrays.asList(group1, group2));
-    assertThat(composite.endpoints()).isEmpty();
-
-    group1.doSetEndpoints(FOO, BAR);
-    assertThat(composite.endpoints()).containsExactlyInAnyOrder(FOO, BAR);
-    // Return memoized endpoints.
-    assertThat(composite.endpoints()).isSameAs(composite.endpoints());
-    group2.doSetEndpoints(CAT, DOG);
-    assertThat(composite.endpoints()).containsExactlyInAnyOrder(FOO, BAR, CAT, DOG);
-    group1.doSetEndpoints(FOO);
-    assertThat(composite.endpoints()).containsExactlyInAnyOrder(FOO, CAT, DOG);
+  @Test void usesNaturalHttpPortsWhenUrls() {
+    assertThat(new InitialEndpointSupplier(HTTP, "http://localhost").get())
+      .isEqualTo(Endpoint.of("localhost", 80));
+    assertThat(new InitialEndpointSupplier(HTTPS, "https://localhost").get())
+      .isEqualTo(Endpoint.of("localhost", 443));
   }
 
+  @Test void defaultsPlainHostsToPort9200() {
+    assertThat(new InitialEndpointSupplier(HTTP, "localhost").get())
+      .isEqualTo(Endpoint.of("localhost", 9200));
+    assertThat(new InitialEndpointSupplier(HTTPS, "localhost").get())
+      .isEqualTo(Endpoint.of("localhost", 443));
+  }
+
+  /** This helps ensure old setups don't break (provided they have http port 9200 open) */
+  @Test public void coersesPort9300To9200() {
+    assertThat(new InitialEndpointSupplier(HTTP, "localhost:9300").get())
+      .isEqualTo(Endpoint.of("localhost", 9200));
+  }
+
+  @Test void parsesListOfLocalhosts() {
+    String hostList = "localhost:9201,localhost:9202";
+    assertThat(new InitialEndpointSupplier(HTTP, hostList).get().endpoints())
+      .containsExactly(Endpoint.of("localhost", 9201), Endpoint.of("localhost", 9202))
+      .containsExactlyElementsOf(new InitialEndpointSupplier(HTTPS, hostList).get().endpoints());
+  }
+
+  @Test void parsesListOfLocalhosts_skipsBlankEntry() {
+    String hostList = "localhost:9201,,localhost:9202";
+    assertThat(new InitialEndpointSupplier(HTTP, hostList).get().endpoints())
+      .containsExactly(Endpoint.of("localhost", 9201), Endpoint.of("localhost", 9202))
+      .containsExactlyElementsOf(new InitialEndpointSupplier(HTTPS, hostList).get().endpoints());
+  }
+
+  @Test void parsesEmptyListOfHosts_toDefault() {
+    assertThat(new InitialEndpointSupplier(HTTP, "").get().endpoints())
+      .containsExactly(Endpoint.of("localhost", 9200));
+  }
+
+  @Test void parsesListOfLocalhosts_failsWhenAllInvalid() {
+    InitialEndpointSupplier supplier = new InitialEndpointSupplier(HTTP, ",");
+    assertThatThrownBy(supplier::get)
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessage("No valid endpoints found in ES hosts: ,");
+  }
 }

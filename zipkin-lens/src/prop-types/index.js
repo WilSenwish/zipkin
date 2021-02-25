@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -18,9 +18,7 @@ export const spanTagPropTypes = PropTypes.shape({
   value: PropTypes.string.isRequired,
 });
 
-export const spanTagsPropTypes = PropTypes.arrayOf(
-  spanTagPropTypes,
-);
+export const spanTagsPropTypes = PropTypes.arrayOf(spanTagPropTypes);
 
 export const spanAnnotationPropTypes = PropTypes.shape({
   value: PropTypes.string.isRequired,
@@ -43,8 +41,8 @@ export const detailedSpanPropTypes = PropTypes.shape({
   serviceName: PropTypes.string.isRequired,
   serviceNames: PropTypes.arrayOf(PropTypes.string).isRequired,
   timestamp: PropTypes.number.isRequired,
-  duration: PropTypes.number.isRequired,
-  durationStr: PropTypes.string.isRequired,
+  duration: PropTypes.number,
+  durationStr: PropTypes.string,
   tags: spanTagsPropTypes.isRequired,
   annotations: spanAnnotationsPropTypes.isRequired,
   errorType: PropTypes.string.isRequired,
@@ -54,9 +52,7 @@ export const detailedSpanPropTypes = PropTypes.shape({
   left: PropTypes.number.isRequired,
 });
 
-export const detailedSpansPropTypes = PropTypes.arrayOf(
-  detailedSpanPropTypes,
-);
+export const detailedSpansPropTypes = PropTypes.arrayOf(detailedSpanPropTypes);
 
 export const spanServiceNameSummary = PropTypes.shape({
   serviceName: PropTypes.string.isRequired,
@@ -79,9 +75,7 @@ export const traceSummaryPropTypes = PropTypes.shape({
   width: PropTypes.number.isRequired,
 });
 
-export const traceSummariesPropTypes = PropTypes.arrayOf(
-  traceSummaryPropTypes,
-);
+export const traceSummariesPropTypes = PropTypes.arrayOf(traceSummaryPropTypes);
 
 export const detailedTraceSummaryPropTypes = PropTypes.shape({
   traceId: PropTypes.string.isRequired,
@@ -93,19 +87,4 @@ export const detailedTraceSummaryPropTypes = PropTypes.shape({
     serviceName: PropTypes.string.isRequired,
     spanName: PropTypes.string.isRequired,
   }).isRequired,
-});
-
-export const globalSearchConditionsPropTypes = PropTypes.arrayOf(PropTypes.shape({
-  key: PropTypes.string,
-  value: PropTypes.oneOfType([
-    PropTypes.string,
-    PropTypes.number,
-    PropTypes.shape({}),
-  ]),
-}));
-
-export const globalSearchLookbackConditionPropTypes = PropTypes.shape({
-  value: PropTypes.string,
-  endTs: PropTypes.number,
-  startTs: PropTypes.number,
 });

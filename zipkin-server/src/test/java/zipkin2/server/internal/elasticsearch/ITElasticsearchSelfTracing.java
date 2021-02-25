@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,7 +13,7 @@
  */
 package zipkin2.server.internal.elasticsearch;
 
-import com.linecorp.armeria.testing.junit.server.mock.MockWebServerExtension;
+import com.linecorp.armeria.testing.junit5.server.mock.MockWebServerExtension;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,9 +21,10 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.boot.test.util.TestPropertyValues;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import zipkin2.elasticsearch.ElasticsearchStorage;
-import zipkin2.server.internal.brave.TracingConfiguration;
+import zipkin2.server.internal.brave.ZipkinSelfTracingConfiguration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static zipkin2.server.internal.elasticsearch.TestResponses.VERSION_RESPONSE;
 import static zipkin2.server.internal.elasticsearch.TestResponses.YELLOW_RESPONSE;
 
 class ITElasticsearchSelfTracing {
@@ -39,10 +40,11 @@ class ITElasticsearchSelfTracing {
       "zipkin.self-tracing.enabled=true",
       "zipkin.self-tracing.message-timeout=1ms",
       "zipkin.self-tracing.traces-per-second=10",
-      "zipkin.storage.type:elasticsearch",
-      "zipkin.storage.elasticsearch.hosts:" + server.httpUri("/")).applyTo(context);
+      "zipkin.storage.type=elasticsearch",
+      "zipkin.storage.elasticsearch.ensure-templates=false",
+      "zipkin.storage.elasticsearch.hosts=" + server.httpUri()).applyTo(context);
     Access.registerElasticsearch(context);
-    context.register(TracingConfiguration.class);
+    context.register(ZipkinSelfTracingConfiguration.class);
     context.refresh();
     storage = context.getBean(ElasticsearchStorage.class);
   }
@@ -56,7 +58,9 @@ class ITElasticsearchSelfTracing {
    * we are nicer.
    */
   @Test void healthcheck_usesB3Single() {
-    server.enqueue(YELLOW_RESPONSE);
+    server.enqueue(VERSION_RESPONSE.toHttpResponse());
+    server.enqueue(YELLOW_RESPONSE.toHttpResponse());
+
     assertThat(storage.check().ok()).isTrue();
 
     assertThat(server.takeRequest().request().headers())

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,14 +13,14 @@
  */
 package zipkin2.elasticsearch;
 
-import com.linecorp.armeria.client.HttpClient;
+import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.AggregatedHttpRequest;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
 import com.linecorp.armeria.common.HttpData;
 import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.MediaType;
 import com.linecorp.armeria.common.ResponseHeaders;
-import com.linecorp.armeria.testing.junit.server.mock.MockWebServerExtension;
+import com.linecorp.armeria.testing.junit5.server.mock.MockWebServerExtension;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -33,16 +33,16 @@ import zipkin2.storage.QueryRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 import static zipkin2.TestObjects.DAY;
 import static zipkin2.TestObjects.TODAY;
-import static zipkin2.elasticsearch.ElasticsearchSpanStore.SPAN;
+import static zipkin2.elasticsearch.VersionSpecificTemplates.TYPE_SPAN;
 
 class ElasticsearchSpanStoreTest {
   static final AggregatedHttpResponse EMPTY_RESPONSE =
-    AggregatedHttpResponse.of(ResponseHeaders.of(HttpStatus.OK), HttpData.EMPTY_DATA);
+    AggregatedHttpResponse.of(ResponseHeaders.of(HttpStatus.OK), HttpData.empty());
 
   @RegisterExtension static MockWebServerExtension server = new MockWebServerExtension();
 
   @BeforeEach void setUp() {
-    storage = ElasticsearchStorage.newBuilder(() -> HttpClient.of(server.httpUri("/"))).build();
+    storage = ElasticsearchStorage.newBuilder(() -> WebClient.of(server.httpUri())).build();
     spanStore = new ElasticsearchSpanStore(storage);
   }
 
@@ -91,7 +91,7 @@ class ElasticsearchSpanStoreTest {
 
   @Test void searchDisabled_doesntMakeRemoteQueryRequests() throws Exception {
     storage.close();
-    storage = ElasticsearchStorage.newBuilder(() -> HttpClient.of(server.httpUri("/")))
+    storage = ElasticsearchStorage.newBuilder(() -> WebClient.of(server.httpUri()))
       .searchEnabled(false)
       .build();
 
@@ -106,15 +106,15 @@ class ElasticsearchSpanStoreTest {
     assertThat(server.takeRequest(100, TimeUnit.MILLISECONDS)).isNull();
   }
 
-  void requestLimitedTo2DaysOfIndices_singleTypeIndex() throws Exception {
+  void requestLimitedTo2DaysOfIndices_singleTypeIndex() {
     long today = TestObjects.midnightUTC(System.currentTimeMillis());
     long yesterday = today - TimeUnit.DAYS.toMillis(1);
 
     // 24 hrs ago always will fall into 2 days (ex. if it is 4:00pm, 24hrs ago is a different day)
     String indexesToSearch = ""
-      + storage.indexNameFormatter().formatTypeAndTimestamp(SPAN, yesterday)
+      + storage.indexNameFormatter().formatTypeAndTimestamp(TYPE_SPAN, yesterday)
       + ","
-      + storage.indexNameFormatter().formatTypeAndTimestamp(SPAN, today);
+      + storage.indexNameFormatter().formatTypeAndTimestamp(TYPE_SPAN, today);
 
     AggregatedHttpRequest request = server.takeRequest().request();
     assertThat(request.path()).startsWith("/" + indexesToSearch + "/_search");

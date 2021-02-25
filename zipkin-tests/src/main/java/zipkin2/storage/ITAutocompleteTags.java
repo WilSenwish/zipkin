@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,15 +13,13 @@
  */
 package zipkin2.storage;
 
-import java.io.IOException;
-import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
-import zipkin2.Span;
-import zipkin2.TestObjects;
+import org.junit.jupiter.api.TestInfo;
 
 import static java.util.Arrays.asList;
 import static org.assertj.core.api.Assertions.assertThat;
+import static zipkin2.TestObjects.spanBuilder;
 
 /**
  * Base test for when {@link StorageComponent.Builder#autocompleteKeys(List)} has values.
@@ -34,9 +32,10 @@ public abstract class ITAutocompleteTags<T extends StorageComponent> extends ITS
     storage.autocompleteKeys(asList("http.host"));
   }
 
-  @Test void Should_not_store_when_key_not_in_autocompleteTags() throws IOException {
-    accept(TestObjects.LOTS_OF_SPANS[0].toBuilder()
-      .timestamp(Instant.now().toEpochMilli())
+  @Test
+  protected void ignores_when_key_not_in_autocompleteTags(TestInfo testInfo) throws Exception {
+    String testSuffix = testSuffix(testInfo);
+    accept(spanBuilder(testSuffix)
       .putTag("http.method", "GET")
       .build());
 
@@ -45,9 +44,10 @@ public abstract class ITAutocompleteTags<T extends StorageComponent> extends ITS
     assertThat(storage.autocompleteTags().getValues("http.method").execute()).isEmpty();
   }
 
-  @Test void getTagsAndValues() throws IOException {
+  @Test protected void getTagsAndValues(TestInfo testInfo) throws Exception {
+    String testSuffix = testSuffix(testInfo);
     for (int i = 0; i < 2; i++) {
-      accept(TestObjects.LOTS_OF_SPANS[i].toBuilder()
+      accept(spanBuilder(testSuffix)
         .putTag("http.method", "GET")
         .putTag("http.host", "host1")
         .build());
@@ -58,9 +58,5 @@ public abstract class ITAutocompleteTags<T extends StorageComponent> extends ITS
 
     assertThat(storage.autocompleteTags().getValues("http.host").execute())
       .containsOnlyOnce("host1");
-  }
-
-  protected void accept(Span... spans) throws IOException {
-    storage.spanConsumer().accept(asList(spans)).execute();
   }
 }

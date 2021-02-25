@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -13,14 +13,14 @@
  */
 package zipkin2.elasticsearch;
 
-import com.linecorp.armeria.client.HttpClient;
+import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.AggregatedHttpRequest;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
 import com.linecorp.armeria.common.HttpData;
 import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.MediaType;
 import com.linecorp.armeria.common.ResponseHeaders;
-import com.linecorp.armeria.testing.junit.server.mock.MockWebServerExtension;
+import com.linecorp.armeria.testing.junit5.server.mock.MockWebServerExtension;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -44,7 +44,7 @@ class ElasticsearchSpanConsumerTest {
   static final Endpoint APP_ENDPOINT = Endpoint.newBuilder().serviceName("app").build();
 
   final AggregatedHttpResponse SUCCESS_RESPONSE =
-    AggregatedHttpResponse.of(ResponseHeaders.of(HttpStatus.OK), HttpData.EMPTY_DATA);
+    AggregatedHttpResponse.of(ResponseHeaders.of(HttpStatus.OK), HttpData.empty());
 
   @RegisterExtension static MockWebServerExtension server = new MockWebServerExtension();
 
@@ -52,7 +52,7 @@ class ElasticsearchSpanConsumerTest {
   SpanConsumer spanConsumer;
 
   @BeforeEach void setUp() throws Exception {
-    storage = ElasticsearchStorage.newBuilder(() -> HttpClient.of(server.httpUri("/")))
+    storage = ElasticsearchStorage.newBuilder(() -> WebClient.of(server.httpUri()))
       .autocompleteKeys(asList("environment"))
       .build();
 
@@ -139,7 +139,7 @@ class ElasticsearchSpanConsumerTest {
 
   @Test void addsPipelineId() throws Exception {
     storage.close();
-    storage = ElasticsearchStorage.newBuilder(() -> HttpClient.of(server.httpUri("/")))
+    storage = ElasticsearchStorage.newBuilder(() -> WebClient.of(server.httpUri()))
       .pipeline("zipkin")
       .build();
     ensureIndexTemplate();
@@ -178,7 +178,7 @@ class ElasticsearchSpanConsumerTest {
   /** Much simpler template which doesn't write the timestamp_millis field */
   @Test void searchDisabled_simplerIndexTemplate() throws Exception {
     storage.close();
-    storage = ElasticsearchStorage.newBuilder(() -> HttpClient.of(server.httpUri("/")))
+    storage = ElasticsearchStorage.newBuilder(() -> WebClient.of(server.httpUri()))
       .searchEnabled(false)
       .build();
 
@@ -210,7 +210,7 @@ class ElasticsearchSpanConsumerTest {
   @Test
   void searchDisabled_doesntAddTimestampMillis() throws Exception {
     storage.close();
-    storage = ElasticsearchStorage.newBuilder(() -> HttpClient.of(server.httpUri("/")))
+    storage = ElasticsearchStorage.newBuilder(() -> WebClient.of(server.httpUri()))
       .searchEnabled(false)
       .build();
     ensureIndexTemplates(storage);
